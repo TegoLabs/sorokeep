@@ -1,12 +1,14 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
+use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{
     testutils::{storage::Persistent, Address as _, Ledger},
-    Address, BytesN, Env,
+    Address, BytesN, Env, IntoVal, InvokeError, Val, Vec,
 };
 
+use crate::contract::Error;
 use crate::storage::DataKey;
 use crate::{LumensVault, LumensVaultClient};
 
@@ -30,9 +32,205 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
 
 /// `env.register` now takes constructor args directly, since `initialize`
 /// was replaced by `__constructor` (see contract.rs change log item 1).
-fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVaultClient<'static> {
-    let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
+///
+/// The bounds are the global, inclusive-at-both-ends pair stored in
+/// `VaultConfig` — the same numbers `get_lock_bounds` returns and the same
+/// ones `deposit` validates against. There is no separate default any more.
+fn setup(
+    env: &Env,
+    admin: &Address,
+    min_lock_ledgers: u32,
+    max_lock_ledgers: u32,
+) -> LumensVaultClient<'static> {
+    let vault_id = env.register(LumensVault, (admin, min_lock_ledgers, max_lock_ledgers));
     LumensVaultClient::new(env, &vault_id)
+}
+
+// ---------------------------------------------------------------------
+// Authorization helpers (E04-02).
+//
+// `env.mock_all_auths()` switches the host into recording mode, where EVERY
+// `require_auth()` succeeds. Under it, an admin function with its guard
+// deleted outright still passes every test in this file — which is why the
+// tests below do not use it.
+//
+// The mechanism used instead is `Env::mock_auths`. Verified against the
+// installed SDK source rather than from memory: soroban-sdk 28.0.0,
+// src/env.rs, the doc comment on `mock_auths` reads "Mock authorizations in
+// the environment which will cause matching invokes of require_auth ... to
+// pass. Authorizations not matching a mocked auth will fail." So authorizing
+// one address does not authorize the rest, and the match covers the function
+// name and the argument list as well as the address.
+//
+// `Env::register` is exempt and needs no mock here: it installs the
+// constructor's auth recording for the duration of the constructor call and
+// restores the previous auth manager afterwards
+// (`register_contract_with_constructor` in soroban-sdk 28). That is why
+// `setup()` can be called in a test that authorizes nobody at all.
+// ---------------------------------------------------------------------
+
+/// Authorize exactly one `require_auth` for the next call: `signer` is
+/// permitted to invoke `fn_name` on `contract` with exactly `args`. Any
+/// other address, function, or argument list in that call fails.
+fn authorize(
+    env: &Env,
+    signer: &Address,
+    contract: &Address,
+    fn_name: &str,
+    args: impl IntoVal<Env, Vec<Val>>,
+) {
+    env.mock_auths(&[MockAuth {
+        address: signer,
+        invoke: &MockAuthInvoke {
+            contract,
+            fn_name,
+            args: args.into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+}
+
+/// Authorize a real `deposit`, which is the only place the auth tree is more
+/// than one level deep.
+///
+/// `deposit` calls `from.require_auth()`, and then makes the token contract
+/// `transfer` the tokens in. That transfer is itself guarded — the token
+/// contract authorizes the *vault* to move the user's balance, as a
+/// sub-invocation of the deposit. A `MockAuth` covering only the outer call
+/// is not enough; the host rejects the transfer with
+/// `Error(Auth, InvalidAction)` and the whole deposit fails. Verified by
+/// running it, not assumed.
+///
+/// Note what this also demonstrates: the mock has to describe the exact
+/// argument list, so a test cannot quietly deposit a different amount than
+/// the one it authorized.
+fn authorize_deposit(
+    env: &Env,
+    user: &Address,
+    vault: &Address,
+    asset: &Address,
+    amount: i128,
+    lock_ledgers: u32,
+) {
+    let transfer = MockAuthInvoke {
+        contract: asset,
+        fn_name: "transfer",
+        args: (user, vault, amount).into_val(env),
+        sub_invokes: &[],
+    };
+
+    env.mock_auths(&[MockAuth {
+        address: user,
+        invoke: &MockAuthInvoke {
+            contract: vault,
+            fn_name: "deposit",
+            args: (user, asset, amount, lock_ledgers).into_val(env),
+            sub_invokes: &[transfer],
+        },
+    }]);
+}
+
+/// The counterpart to `assert_unauthorized`: the call WAS authorized, ran to
+/// completion, and the contract itself returned `expected`.
+///
+/// Note the arm this matches: a contract that returns `Err(e)` is reported
+/// as the outer `Err(Ok(e))` — the invocation is treated as failed, but the
+/// error is carried rather than discarded, which is exactly what separates
+/// it from the auth failure's `Err(Err(InvokeError::Abort))`. Both are outer
+/// errors; only one of them is the contract talking.
+///
+/// Asserting a specific variant is what distinguishes "the bounds rejected
+/// this deposit" from "something else went wrong", and it is the only way a
+/// bounds test proves the bounds are load-bearing rather than merely
+/// present.
+fn assert_contract_error<T, C, E>(
+    res: &Result<Result<T, C>, Result<E, InvokeError>>,
+    expected: E,
+    what: &str,
+) where
+    T: core::fmt::Debug,
+    C: core::fmt::Debug,
+    E: core::fmt::Debug + PartialEq,
+{
+    match res {
+        Err(Ok(actual)) => assert_eq!(
+            *actual, expected,
+            "{what} was refused, but with a different error than expected"
+        ),
+        other => panic!(
+            "{what} should have been refused by the contract with {expected:?}. \
+             Observed: {other:?}. An outer Err(..) carrying an InvokeError means \
+             the call never reached the contract's own logic (auth or trap), so \
+             it would have failed the same way with the bounds removed."
+        ),
+    }
+}
+
+/// Assert that a `try_*` call failed *because authorization was missing*.
+///
+/// ## The shape, and why it is not the obvious one
+///
+/// A missing `require_auth` is NOT one of the contract's `Error` variants, and
+/// it is not an "unauthorized" error code either. Observed in this repo
+/// against soroban-sdk 28.0.0 / soroban-env-host 28.0.2, calling
+/// `try_update_config` with only a non-admin's authorization registered:
+///
+/// ```text
+/// attack = Err(Err(Abort))
+/// ```
+///
+/// A generated `try_*` method returns a two-level result —
+///
+/// ```text
+/// Result<Result<T, ConversionError>, Result<Error, InvokeError>>
+///                          ^^^^^^^^^ contract ran and returned Err(..)
+///     ^^^^^^^^^^^^^^^^^ failed without the contract deciding (auth, trap, budget)
+/// ```
+///
+/// — and a failed authorization lands in the OUTER `Err` as
+/// `InvokeError::Abort`. Note the inner `Err` arm: when the contract itself
+/// returns an error, the invocation still counts as failed, so that surfaces
+/// as the outer `Err(Ok(e))` carrying the contract's `Error`. Both are outer
+/// errors; `assert_contract_error` below is what tells them apart. The host escalates the `Error(Auth, InvalidAction)`
+/// it produces internally into a contract abort before it can cross the
+/// invocation boundary, so the auth code is not visible to the caller. The
+/// diagnostic events that *would* name it (`Error(Auth, InvalidAction)`,
+/// "Unauthorized function call for address ...") are rolled back with the
+/// failed invocation: `env.logs().all()` returns an empty vector afterwards,
+/// which was checked rather than assumed.
+///
+/// Two consequences for how these tests are written:
+///
+/// 1. Asserting only `is_err()` accepts the contract's own error too, so a
+///    test can pass for the wrong reason — as it does when bounds validation
+///    happens to reject the attacker's arguments for them. This helper
+///    demands the outer `Err(Err(InvokeError::Abort))` shape and prints what
+///    it saw instead.
+/// 2. `Abort` on its own does NOT prove the cause — a contract panic
+///    produces it too. What makes the negative case sound is the pair of
+///    positive control and unchanged state that each caller pairs with this:
+///    the same call authorized as the admin succeeds, and the stored state is
+///    asserted identical afterwards. Neither the shape nor this function can
+///    substitute for those.
+///
+/// Three type parameters because the two levels carry different types in
+/// SDK 28: the inner error is `ConversionError`, the outer pairs the
+/// contract's own error type with `InvokeError`.
+fn assert_unauthorized<T, C, E>(res: &Result<Result<T, C>, Result<E, InvokeError>>, what: &str)
+where
+    T: core::fmt::Debug,
+    C: core::fmt::Debug,
+    E: core::fmt::Debug,
+{
+    match res {
+        Err(Err(InvokeError::Abort)) => {}
+        other => panic!(
+            "{what} did not fail as an unauthorized invocation. Observed: {other:?}. \
+             Expected the outer Err(Err(Abort)). If it is the outer Err(Ok(_)) the \
+             authorization SUCCEEDED and the contract returned one of its own errors \
+             — the call was refused by validation, not by the guard."
+        ),
+    }
 }
 
 #[test]
@@ -43,7 +241,7 @@ fn test_deposit_and_withdraw() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 100);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -51,7 +249,7 @@ fn test_deposit_and_withdraw() {
 
     vault_client.add_asset(&token_client.address);
 
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
     assert_eq!(returned_vault_id, 1);
 
     assert_eq!(token_client.balance(&user), 900);
@@ -82,17 +280,17 @@ fn test_deposit_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 100);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0);
+    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0, &10);
     assert!(zero_res.is_err());
 
-    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100);
+    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100, &10);
     assert!(negative_res.is_err());
 }
 
@@ -108,14 +306,14 @@ fn test_withdraw_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 100);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &-200);
@@ -138,14 +336,14 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 100);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let count_key = DataKey::UserVaultCount(user.clone());
     let ttl_after_first_deposit =
@@ -156,7 +354,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     env.ledger()
         .with_mut(|l| l.sequence_number += ttl_after_first_deposit - 1000);
 
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let ttl_after_second_deposit =
         env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
@@ -165,6 +363,146 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
         ttl_after_second_deposit > 1000,
         "UserVaultCount TTL was not refreshed on the second deposit — it would archive soon"
     );
+}
+
+// ---------------------------------------------------------------------
+// E04-06: update_config authorization.
+//
+// update_config is the most consequential admin function after upgrade,
+// because the bounds it writes are what every future deposit is checked
+// against. An attacker who can call it sets min to 0 and the lock becomes
+// advisory: a deposit could be created already withdrawable. So this test
+// is about the guard, and the two state assertions after each failed call
+// exist so the test cannot pass merely because the call errored for some
+// unrelated reason.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_update_config_rejects_unauthorized_caller() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.sequence_number = 1000);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let vault_client = setup(&env, &admin, 10, 100);
+    let vault = &vault_client.address;
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    let asset = &token_client.address;
+
+    // The test asset is a real Stellar Asset Contract, and `mint` is guarded
+    // by the token admin's own `require_auth`. Under `mock_all_auths` this
+    // was invisible; under `mock_auths` it has to be authorized explicitly,
+    // which is the first sign that the mechanism really is restrictive.
+    authorize(&env, &token_admin, asset, "mint", (&user, &1000i128));
+    token_asset.mint(&user, &1000);
+
+    authorize(&env, &admin, vault, "add_asset", (asset,));
+    vault_client.add_asset(asset);
+
+    // ---- Criterion 1: the admin can change the bounds, and the change is
+    // observable through the view clients bind to.
+    //
+    // Note the client shape: the contract fn returns `Result<(u32, u32),
+    // Error>`, but the generated `get_lock_bounds` returns the bare tuple and
+    // panics if the contract ever returns `Err`. The `try_get_lock_bounds`
+    // variant is the one that exposes the two-level result. Since config is
+    // written atomically in the constructor, `Err` is unreachable here.
+    assert_eq!(vault_client.get_lock_bounds(), (10u32, 100u32));
+
+    authorize(&env, &admin, vault, "update_config", (&50u32, &60u32));
+    vault_client.update_config(&50, &60);
+
+    assert_eq!(vault_client.get_lock_bounds(), (50u32, 60u32));
+
+    // ---- Criterion 2: a non-admin cannot, and the attempt changes nothing.
+    //
+    // The attacker gets an authorization entry of their own, deliberately
+    // for this very function and these very arguments. That is the strong
+    // form of the negative: it fails while a correctly-shaped auth exists
+    // in the same call, so the test is proving the guard checks *who*, not
+    // merely whether any authorization was supplied.
+    authorize(&env, &attacker, vault, "update_config", (&0u32, &1000u32));
+    let attack = vault_client.try_update_config(&0, &1000);
+    assert_unauthorized(&attack, "update_config by a non-admin");
+
+    // The attempted write was min=0, max=1000. If any part of it had landed,
+    // this would not still be (50, 60).
+    assert_eq!(
+        vault_client.get_lock_bounds(),
+        (50u32, 60u32),
+        "a rejected update_config call still changed the stored bounds"
+    );
+
+    // A second, differently-shaped attempt, so the test does not depend on
+    // the particular arguments chosen above.
+    authorize(&env, &attacker, vault, "update_config", (&0u32, &0u32));
+    let attack = vault_client.try_update_config(&0, &0);
+    assert_unauthorized(&attack, "update_config by a non-admin (second attempt)");
+    assert_eq!(vault_client.get_lock_bounds(), (50u32, 60u32));
+
+    // ---- Criterion 3: deposits are validated against the NEW bounds.
+    //
+    // The new bounds (50, 60) sit strictly inside the old ones (10, 100),
+    // so a period of 10 or of 100 was valid before the change and must be
+    // refused now. That is the assertion that would fail if the contract
+    // cached the config it was deployed with, or read anything but the
+    // value update_config actually wrote.
+    authorize_deposit(&env, &user, vault, asset, 100, 10);
+    let below_new_min = vault_client.try_deposit(&user, asset, &100, &10);
+    assert_contract_error(
+        &below_new_min,
+        Error::InvalidLockPeriod,
+        "a 10-ledger deposit after the admin raised the minimum to 50",
+    );
+    assert_eq!(vault_client.get_user_vault_count(&user), 0);
+
+    authorize_deposit(&env, &user, vault, asset, 100, 100);
+    let above_new_max = vault_client.try_deposit(&user, asset, &100, &100);
+    assert_contract_error(
+        &above_new_max,
+        Error::InvalidLockPeriod,
+        "a 100-ledger deposit after the admin lowered the maximum to 60",
+    );
+    assert_eq!(vault_client.get_user_vault_count(&user), 0);
+
+    // And a period inside the new bounds succeeds, with unlock_ledger
+    // derived from the caller's period and the current sequence. 50 is
+    // exactly the new minimum, so this also pins down that the range is
+    // inclusive at both ends.
+    authorize_deposit(&env, &user, vault, asset, 100, 50);
+    let vault_id = vault_client.deposit(&user, asset, &100, &50);
+    assert_eq!(vault_id, 1);
+    assert_eq!(vault_client.get_user_vault_count(&user), 1);
+
+    let entry = vault_client.get_vault(&user, asset, &1);
+    assert_eq!(entry.unlock_ledger, 1050);
+
+    // ---- Close the loop on the attack the auth check exists to stop.
+    //
+    // Had the attacker's `min = 0` gone through, `deposit` with
+    // `lock_ledgers = 0` would have been accepted and the resulting vault
+    // withdrawable immediately. It cannot be: the bound is still 50, and the
+    // vault just created refuses a withdrawal 50 ledgers before it matures.
+    // The specific error matters — `TimelockNotExpired` is the lock doing
+    // its job, not an unrelated refusal.
+    authorize(
+        &env,
+        &user,
+        vault,
+        "withdraw",
+        (&user, asset, &1u32, &100i128),
+    );
+    let early = vault_client.try_withdraw(&user, asset, &1, &100);
+    assert_contract_error(
+        &early,
+        Error::TimelockNotExpired,
+        "an early withdrawal of a vault deposited under the new bounds",
+    );
+    assert_eq!(token_client.balance(&user), 900);
 }
 
 // ---------------------------------------------------------------------
@@ -207,7 +545,7 @@ fn test_real_upgrade_and_state_migration() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 100);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -216,7 +554,7 @@ fn test_real_upgrade_and_state_migration() {
 
     // 1. Write real state through the OLD contract's own deposit logic —
     //    not a raw storage poke.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500, &10);
     assert_eq!(returned_vault_id, 1);
     assert_eq!(vault_client.version(), 1);
 

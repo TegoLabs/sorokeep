@@ -30,6 +30,10 @@ pub enum Error {
     TimelockNotExpired = 5,
     VaultNotFound = 6,
     InvalidAmount = 7,
+    // A lock period fell outside the configured bounds, or the admin tried
+    // to set bounds that could never accept a deposit. Appended, not
+    // renumbered — see the note on error codes at the top of this file.
+    InvalidLockPeriod = 8,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280; // 86,400s / 5s-per-ledger
@@ -64,16 +68,31 @@ impl LumensVault {
     // case with a multisig admin, the admin must co-sign the deploy
     // transaction rather than being named without its consent.
     //
+    // The `Result` return is not incidental. Bounds are validated here, and a
+    // `Result`-returning constructor is the only shape that reports the refusal
+    // as a decodable contract error: `panic_with_error!` aborts the deploy with
+    // a host error, which a deploy script cannot distinguish from a genuine
+    // failure of the transaction itself. Both forms compile against
+    // soroban-sdk 28; this one was chosen for that reason.
+    //
     // Note: `///` doc comments on contract functions are embedded in the wasm's
     // spec metadata and are paid for in rent forever. Keep them to one line and
     // put the reasoning in `//` comments like this one.
-    pub fn __constructor(env: Env, admin: Address, default_timelock_ledgers: u32) {
+    pub fn __constructor(
+        env: Env,
+        admin: Address,
+        min_lock_ledgers: u32,
+        max_lock_ledgers: u32,
+    ) -> Result<(), Error> {
         admin.require_auth();
+
+        Self::validate_bounds(min_lock_ledgers, max_lock_ledgers)?;
 
         env.storage().instance().set(&DataKey::Admin, &admin);
 
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -83,6 +102,8 @@ impl LumensVault {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        Ok(())
     }
 
     /// Compile-time constant identifying the currently-running bytecode.
@@ -164,12 +185,31 @@ impl LumensVault {
         Ok(())
     }
 
-    pub fn update_config(env: Env, new_timelock_ledgers: u32) -> Result<(), Error> {
+    /// Replaces the global lock bounds without an upgrade.
+    //
+    // `validate_bounds` is the same function the constructor runs, called
+    // rather than copied. Duplicating the check is how an admin ends up able
+    // to set `max < min` — a state the constructor would have refused, and
+    // which bricks deposits until somebody upgrades the contract.
+    //
+    // The change is not retroactive. Every existing vault already had its
+    // `unlock_ledger` fixed at deposit time, so narrowing the bounds below an
+    // existing vault's period leaves that vault withdrawable exactly when it
+    // was before. Only deposits made from here on are validated against the
+    // new numbers.
+    pub fn update_config(
+        env: Env,
+        min_lock_ledgers: u32,
+        max_lock_ledgers: u32,
+    ) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
+        Self::validate_bounds(min_lock_ledgers, max_lock_ledgers)?;
+
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers: new_timelock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
         Ok(())
@@ -192,7 +232,17 @@ impl LumensVault {
 
     // --- Vault operations ---
 
-    pub fn deposit(env: Env, from: Address, asset: Address, amount: i128) -> Result<u32, Error> {
+    /// Deposits the tokens and locks them for the caller's chosen period.
+    //
+    // `lock_ledgers` is required, with no default and no `Option` fallback: a
+    // period nobody chose is a period the user was not told about.
+    pub fn deposit(
+        env: Env,
+        from: Address,
+        asset: Address,
+        amount: i128,
+        lock_ledgers: u32,
+    ) -> Result<u32, Error> {
         from.require_auth();
 
         if amount <= 0 {
@@ -201,6 +251,14 @@ impl LumensVault {
 
         Self::check_paused(&env)?;
         Self::check_whitelisted(&env, &asset)?;
+
+        let config = Self::get_config(&env)?;
+        // Inclusive at both ends: a period exactly equal to min or max is
+        // valid. The bounds mean "the shortest and longest period allowed",
+        // not "the range of values rejected".
+        if lock_ledgers < config.min_lock_ledgers || lock_ledgers > config.max_lock_ledgers {
+            return Err(Error::InvalidLockPeriod);
+        }
 
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&from, &env.current_contract_address(), &amount);
@@ -227,8 +285,16 @@ impl LumensVault {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        let config = Self::get_config(&env)?;
-        let unlock_ledger = env.ledger().sequence() + config.default_timelock_ledgers;
+        // Derived from the caller's choice, not from config — config supplies
+        // the permitted range and nothing else. `checked_add` rather than `+`
+        // because `max_lock_ledgers` is admin-supplied up to u32::MAX, so this
+        // addition can genuinely overflow; the release profile's
+        // overflow-checks would turn that into a trap with no useful error.
+        let unlock_ledger = env
+            .ledger()
+            .sequence()
+            .checked_add(lock_ledgers)
+            .ok_or(Error::InvalidLockPeriod)?;
 
         let vault_entry = VaultEntry::V1(VaultEntryV1 {
             amount,
@@ -378,7 +444,35 @@ impl LumensVault {
             .ok_or(Error::NotInitialized)
     }
 
+    /// Live (min, max) lock bounds, inclusive at both ends.
+    //
+    // The frontend's lock-period picker binds to this rather than hardcoding
+    // numbers, so an admin's bound change is visible without a client
+    // release. It returns exactly the pair a subsequent `deposit` validates
+    // against — both read the same stored `VaultConfig`.
+    pub fn get_lock_bounds(env: Env) -> Result<(u32, u32), Error> {
+        let config = Self::get_config(&env)?;
+        Ok((config.min_lock_ledgers, config.max_lock_ledgers))
+    }
+
     // --- Internal helpers ---
+
+    /// The single definition of a usable lock-bounds pair, shared by
+    /// `__constructor` and `update_config`.
+    ///
+    /// `min == 0` is refused because a zero minimum makes the lock a
+    /// suggestion: a deposit could be created already withdrawable, which is
+    /// exactly the attack `update_config`'s auth check exists to prevent.
+    /// `max < min` is refused because no period could then satisfy both
+    /// bounds, and the contract could never accept another deposit — no admin
+    /// function can undo that except another `update_config` with sane
+    /// numbers, so it is recoverable but only by someone who notices.
+    fn validate_bounds(min_lock_ledgers: u32, max_lock_ledgers: u32) -> Result<(), Error> {
+        if min_lock_ledgers == 0 || max_lock_ledgers < min_lock_ledgers {
+            return Err(Error::InvalidLockPeriod);
+        }
+        Ok(())
+    }
 
     fn get_admin(env: &Env) -> Result<Address, Error> {
         env.storage()
