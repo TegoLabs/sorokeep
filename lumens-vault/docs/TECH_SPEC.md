@@ -29,7 +29,7 @@ good.
 ### 2.1 Vault Core
 
 - **FR-1 (DECIDED).** Users may deposit any admin-whitelisted asset.
-- **FR-2 (DECIDED, in progress).** Users select a lock period per deposit,
+- **FR-2 (VERIFIED).** Users select a lock period per deposit,
   within admin-configured `[min_lock_ledgers, max_lock_ledgers]` bounds.
   This restores the original design after it was lost during an earlier
   implementation pass; see epic E02 in the issue backlog.
@@ -48,12 +48,14 @@ good.
   - Changing the bounds never affects vaults that already exist: their
     `unlock_ledger` was fixed at deposit time, so a bounds change is
     forward-looking only.
-  **Status (2026-09-29):** this is the specified model, not yet shipped.
-  The contract still carries the single `default_timelock_ledgers` field
-  (`storage.rs`, `contract.rs`); `Error::InvalidLockPeriod` does not exist
-  yet. E02-02 through E02-12 must land, with the boundary tests, before
-  this tag may move to VERIFIED — until then, do not cite FR-2 as
-  describing deployed behavior.
+  **Status (2026-09-30): shipped and verified.** The contract now takes
+  `min_lock_ledgers` and `max_lock_ledgers` in `__constructor` and
+  `update_config` (`storage.rs`, `contract.rs`), rejects out-of-range
+  periods with `Error::InvalidLockPeriod = 8`, and exposes the live bounds
+  via `get_lock_bounds`. The model above is covered by the boundary tests
+  at both inclusive edges, the bounds-change tests and the
+  no-retroactive-effect test in `test.rs`. Do not change the model text
+  without landing a matching contract change in the same PR.
 - **FR-3 (DECIDED).** Withdrawal is single-step (deposit → wait → withdraw),
   not the two-step initiate/claim pattern considered earlier. Partial
   withdrawal is supported — a user may withdraw less than a vault's full
