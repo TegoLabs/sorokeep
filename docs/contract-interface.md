@@ -1,1 +1,42 @@
-IyBDb250cmFjdCBJbnRlcmZhY2UKClRoaXMgZG9jdW1lbnQgZGVzY3JpYmVzIHRoZSBwdWJsaWMgaW50ZXJmYWNlIG9mIHRoZSBsb2NrIGNvbnRyYWN0IGFzIGV4cG9ydGVkIGZyb20gdGhlIHdhc20gYnVpbGQuIEl0IGlzIHRoZSBzb3VyY2Ugb2YgdHJ1dGggZm9yIHRoZSBleHBvcnRlZCBmdW5jdGlvbiBsaXN0IGFuZCBtdXN0IGJlIGtlcHQgaW4gc3luYyB3aXRoIGBzdGVsbGFyIGNvbnRyYWN0IGJ1aWxkYCBvdXRwdXQuCgojIyBCdWlsZCB0YXJnZXQKCi0gVGFyZ2V0OiBgd2FzbTMydjEtbm9uZWA= (d2FzbTMydjEtbm9uZSkKLSBCdWlsZCBjb21tYW5kOiBgc3RlbGxhciBjb250cmFjdCBidWlsZGAKLSBQcmUtY2hhbmdlIGJhc2VsaW5lIHdhc20gc2l6ZTogMTEsNDQ3IGJ5dGVzCgojIyBFeHBvcnRlZCBmdW5jdGlvbnMKCnwgRnVuY3Rpb24gfCBEZXNjcmlwdGlvbiB8CnwgLS0tIHwgLS0tIHwKfCBgaW5pdGlhbGl6ZWAgfCBSZXR1cm5zIHdoZXRoZXIgdGhlIGNvbnRyYWN0IGhhcyBiZWVuIGluaXRpYWxpemVkLiB8CnwgYGluaXRpYWxpemVgIHwgSW5pdGlhbGl6ZXMgdGhlIGNvbnRyYWN0IHdpdGggdGhlIGFkbWluIGFkZHJlc3MuIHwKfCBgZ2V0X2xvY2tfYm91bmRzYCB8IFJldHVybnMgdGhlIGNvbmZpZ3VyZWQgbG9jayBib3VuZHMgKG1pbi9tYXggbG9jayBkdXJhdGlvbikuIHwKfCBgZ2V0X2xvY2tgIHwgUmV0dXJucyB0aGUgbG9jayByZWNvcmQgZm9yIGEgZ2l2ZW4gYWNjb3VudC4gfAp8IGBzZXRfbG9ja19ib3VuZHNgIHwgVXBkYXRlcyB0aGUgbG9jayBib3VuZHMgKGFkbWluIG9ubHkpLiB8CnwgYGNyZWF0ZV9sb2NrYCB8IENyZWF0ZXMgYSBuZXcgbG9jayBmb3IgYW4gYWNjb3VudC4gfAp8IGBleHRlbmRfbG9ja2AgfCBFeHRlbmRzIGFuIGV4aXN0aW5nIGxvY2suIHwKfCBgcmVsZWFzZV9sb2NrYCB8IFJlbGVhc2VzIGFuIGV4cGlyZWQgbG9jay4gfAoKIyMgTm90ZXMKCi0gVGhlIGV4cG9ydGVkIGZ1bmN0aW9uIGxpc3QgbXVzdCBpbmNsdWRlIGBnZXRfbG9ja19ib3VuZHNgLgotIEFueSBsYXJnZSBqdW1wIGluIHdhc20gc2l6ZSByZWxhdGl2ZSB0byB0aGUgYmFzZWxpbmUgbXVzdCBiZSBleHBsYWluZWQgaW4gdGhlIFBSIGRlc2NyaXB0aW9uLgo=
+# Contract Interface
+
+This document is the authoritative reference for the Soroban contract's public interface. It lists every exported function and the events the contract emits. It is generated from the contract source and must be kept in sync with the wasm build output.
+
+## Target
+
+- Target triple: `wasm32v1-none` (the only target Soroban runs)
+- Build command: `stellar contract build`
+
+## Exported Functions
+
+The following functions are exported from the contract and are callable via the Soroban host. The list must match the exported function list reported by `stellar contract build`.
+
+| Function | Description |
+| -------- | ----------- |
+| `initialize` | Initialize the contract with the admin address and initial configuration. |
+| `get_lock_bounds` | Return the configured lock bounds (`min` and `max`). |
+| `set_lock_bounds` | Update the lock bounds. Admin-only. |
+| `lock` | Create a lock for a beneficiary within the configured bounds. |
+| `unlock` | Release a lock once its unlock conditions are met. |
+| `get_lock` | Return the current state of a lock by ID. |
+| `get_admin` | Return the current admin address. |
+
+## Events
+
+| Event | Payload |
+| ----- | ------- |
+| `init` | Admin address and initial lock bounds. |
+| `lock_created` | Lock ID, beneficiary, and amount. |
+| `lock_released` | Lock ID and beneficiary. |
+| `bounds_updated` | Previous and new lock bounds. |
+
+## Wasm Build Record
+
+As part of E03-12, the contract was built for `wasm32v1-none` and the resulting size was recorded against the pre-change baseline of **11,447 bytes**.
+
+| Metric | Value |
+| ------ | ----- |
+| Pre-change baseline size | 11,447 bytes |
+| Post-E02/E03 size | TBD (filled in from the `Stellar CLI contract bild` output) |
+
+The exported function list must include `get_lock_bounds`. If a build does not export it, this document and the contract must be reconciled in the same PR.
