@@ -50,9 +50,11 @@ fn setup(
 // Authorization helpers (E04-02).
 //
 // `env.mock_all_auths()` switches the host into recording mode, where EVERY
-// `require_auth()` succeeds. Under it, an admin function with its guard
-// deleted outright still passes every test in this file — which is why the
-// tests below do not use it.
+// `require_auth()` succeeds. It is not evidence about access control, and
+// that was measured rather than assumed: with `update_config`'s
+// `admin.require_auth()` deleted, the suite still reported 5 passed / 1
+// failed — every test that had been on `mock_all_auths` passed with the
+// guard removed. Only the tests built on the helpers below noticed.
 //
 // The mechanism used instead is `Env::mock_auths`. Verified against the
 // installed SDK source rather than from memory: soroban-sdk 28.0.0,
@@ -61,6 +63,13 @@ fn setup(
 // pass. Authorizations not matching a mocked auth will fail." So authorizing
 // one address does not authorize the rest, and the match covers the function
 // name and the argument list as well as the address.
+//
+// Conversion is deliberately partial, one guarded function per issue. Two
+// things decide whether a given test can be converted at all: whether the
+// flow needs a *contract* to authorize something (see `authorize` — it
+// cannot), and whether the E04 issue that owns it has landed yet. A test
+// still on `mock_all_auths` is untested for authorization, not exempt from
+// it; the comment above it should say which.
 //
 // `Env::register` is exempt and needs no mock here: it installs the
 // constructor's auth recording for the duration of the constructor call and
@@ -72,6 +81,32 @@ fn setup(
 /// Authorize exactly one `require_auth` for the next call: `signer` is
 /// permitted to invoke `fn_name` on `contract` with exactly `args`. Any
 /// other address, function, or argument list in that call fails.
+///
+/// ## `signer` must be an account, not a contract
+///
+/// `Env::mock_auths` (soroban-sdk 28, src/env.rs) does this for every entry
+/// it is given:
+///
+/// ```text
+/// self.register_at(a.address, MockAuthContract, ())
+/// ```
+///
+/// That is how the authorization is faked — the address gets a contract that
+/// implements nothing but `__check_auth`. It also means the call *replaces
+/// whatever contract instance already lives at that address*. Mock a contract
+/// address and you have just deleted that contract.
+///
+/// This was hit, not reasoned about: authorizing the vault so it could
+/// `transfer` tokens out during `withdraw` produced
+/// `Error(Context, MissingValue)` with "calling unknown contract function,
+/// withdraw" — the vault had been replaced by the empty stub.
+///
+/// The practical rule, which decides which of the auth tests can be written
+/// at all: **`mock_auths` covers flows where tokens come IN; flows where
+/// tokens go OUT stay on `mock_all_auths`.** A successful `withdraw` is
+/// always the latter, because the token contract makes the vault the `from`
+/// of the `transfer`. Tests that only *attempt* an early or invalid
+/// withdrawal never reach the transfer and convert fine.
 fn authorize(
     env: &Env,
     signer: &Address,
@@ -235,6 +270,13 @@ where
 
 #[test]
 fn test_deposit_and_withdraw() {
+    // NOT convertible to `mock_auths` — see the note on `authorize` above.
+    // A successful `withdraw` moves tokens OUT, so the token contract
+    // requires the *vault's* authorization for that `transfer`, and mocking
+    // a contract address overwrites the contract living there. This test has
+    // to stay on `mock_all_auths`, which says nothing about authorization
+    // either way — it just means this test is not evidence for it. The
+    // authorization behaviour is covered by the E04 tests instead.
     let env = Env::default();
     env.mock_all_auths();
 
@@ -275,6 +317,11 @@ fn test_deposit_and_withdraw() {
 fn test_deposit_rejects_non_positive_amount() {
     // NEW — covers the fix in contract.rs change log item 2. Before this
     // fix, neither of these guarded at all.
+    //
+    // Still on `mock_all_auths`: untested for authorization, not exempt from
+    // it. It is convertible — both deposits are refused by the `amount` guard
+    // before the token transfer, so nothing outbound is authorized — just not
+    // this issue's job. See the E04-02 helpers above.
     let env = Env::default();
     env.mock_all_auths();
 
@@ -301,26 +348,60 @@ fn test_withdraw_rejects_non_positive_amount() {
     // check and *inflated* the caller's recorded balance via
     // `entry_v1.amount -= amount`. See contract.rs change log item 2 for
     // the full walkthrough.
+    //
+    // WORKED EXAMPLE (E04-02). This test was on `env.mock_all_auths()` and
+    // is converted to the shared helpers, so the twelve auth tests that
+    // follow have one pattern to copy instead of twelve. Its assertions are
+    // unchanged — only the way each call is authorized is different, which
+    // is the point: the same test intent must survive the conversion, or the
+    // conversion is not a conversion.
     let env = Env::default();
-    env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
+
     let vault_client = setup(&env, &admin, 10, 100);
+    let vault = &vault_client.address;
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
-    token_asset.mint(&user, &1000);
-    vault_client.add_asset(&token_client.address);
+    let asset = &token_client.address;
 
-    vault_client.deposit(&user, &token_client.address, &500, &10);
+    // Three signers, three authorizations, in the order they are needed.
+    // Each call replaces the previous set: `mock_auths` does not accumulate.
+
+    // 1. The token admin mints the test balance. This is an admin guard on a
+    //    *different* contract, which is the case that silently goes missing.
+    authorize(&env, &token_admin, asset, "mint", (&user, &1000i128));
+    token_asset.mint(&user, &1000);
+
+    // 2. The vault admin whitelists the asset. This is the shape the E04
+    //    admin tests care about: one account, one function, one argument.
+    authorize(&env, &admin, vault, "add_asset", (asset,));
+    vault_client.add_asset(asset);
+
+    // 3. The user deposits. The only two-level auth tree in the contract, so
+    //    it gets its own helper rather than an inline construction.
+    authorize_deposit(&env, &user, vault, asset, 500, 10);
+    vault_client.deposit(&user, asset, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
-    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &-200);
-    assert!(res.is_err());
+    // 4. The user attempts the negative withdrawal. It is refused by the
+    //    `amount` guard, which runs before the token transfer, so no token
+    //    authorization is needed — and if that ever changes, this test fails
+    //    loudly rather than passing for the wrong reason.
+    authorize(
+        &env,
+        &user,
+        vault,
+        "withdraw",
+        (&user, asset, &1u32, &-200i128),
+    );
+    let res = vault_client.try_withdraw(&user, asset, &1, &-200);
+    assert_contract_error(&res, Error::InvalidAmount, "a negative withdrawal");
 
     // Balance must be exactly what was deposited — not inflated.
-    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    let entry = vault_client.get_vault(&user, asset, &1);
     assert_eq!(entry.amount, 500);
 }
 
@@ -331,6 +412,10 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     // touched again, so it would archive on its own default schedule
     // regardless of how active the user was — silently blocking every
     // future deposit from that user once it did.
+    //
+    // Still on `mock_all_auths`: untested for authorization, not exempt from
+    // it. It is convertible — both deposits are inbound, so `authorize_deposit`
+    // covers them — just not this issue's job. See the E04-02 helpers above.
     let env = Env::default();
     env.mock_all_auths();
 
@@ -524,6 +609,11 @@ fn test_update_config_rejects_unauthorized_caller() {
 //
 // If your workspace layout puts these crates somewhere else, fix the path
 // in the `contractimport!` call below to match.
+//
+// Still on `mock_all_auths`. `upgrade` is admin-guarded and gets its own E04
+// test; converting this one as well would bury the migration assertions,
+// which are the entire point of it. Authorization for `upgrade` is therefore
+// currently untested — a known gap, not an oversight.
 // ---------------------------------------------------------------------
 
 mod new_contract {
