@@ -378,6 +378,12 @@ impl LumensVault {
             .ok_or(Error::NotInitialized)
     }
 
+    /// Returns the configured (min, max) lock-period bounds in ledgers.
+    pub fn get_lock_bounds(env: Env) -> Result<(u32, u32), Error> {
+        let config = Self::get_config(&env)?;
+        Ok((config.min_lock_ledgers, config.max_lock_ledgers))
+    }
+
     // --- Internal helpers ---
 
     fn get_admin(env: &Env) -> Result<Address, Error> {
