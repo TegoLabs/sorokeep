@@ -58,7 +58,7 @@ for (const [testName, counts] of Object.entries(results)) {
 }
 
 if (!flakyFound) {
-  summary = '### ✅ No Flaky Tests Detected\n\nAll tests passed consistently across all iterations.\n';
+  summary = '### ★️ No Flaky Tests Detected\n\nAll tests passed consistently across all iterations.\n';
   console.log('\nNo flaky tests detected.');
 }
 
