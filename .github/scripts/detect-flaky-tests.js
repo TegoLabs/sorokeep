@@ -52,7 +52,7 @@ summary += 'The following tests exhibited flaky behavior (both passing and faili
 for (const [testName, counts] of Object.entries(results)) {
   if (counts.passes > 0 && counts.failures > 0) {
     flakyFound = true;
-    summary += `- **${testName}**: Passed ${counts.passes} times, Failed ${counts.failures} times.\n`;
+    summary += `- **\${testName}**: Passed ${counts.passes} times, Failed ${counts.failures} times.\n`;
     console.log(`FLAKY TEST DETECTED: ${testName} (Passes: ${counts.passes}, Failures: ${counts.failures})`);
   }
 }
