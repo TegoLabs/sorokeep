@@ -33,13 +33,27 @@ good.
   within admin-configured `[min_lock_ledgers, max_lock_ledgers]` bounds.
   This restores the original design after it was lost during an earlier
   implementation pass; see epic E02 in the issue backlog.
-  **Sub-questions, both DECIDED 2026-09-28:** `lock_ledgers` is *always*
-  required on `deposit` — there is no default-fallback path. Bounds are
-  *global* across all whitelisted assets, not per-asset. The single
-  `default_timelock_ledgers` config field is therefore replaced by
-  `min_lock_ledgers` and `max_lock_ledgers`. The range is inclusive at both
-  ends. Changing the bounds never affects vaults that already exist; their
-  `unlock_ledger` was fixed at deposit time.
+  **Decided model, recorded here so it does not have to be derived from
+  code (sub-questions DECIDED 2026-09-28):**
+  - `lock_ledgers` is *always* required on `deposit` — there is no
+    default-fallback path.
+  - Bounds are *global* across all whitelisted assets, not per-asset. The
+    single `default_timelock_ledgers` config field is replaced by
+    `min_lock_ledgers` and `max_lock_ledgers`.
+  - The range is inclusive at both ends: a deposit with
+    `lock_ledgers == min_lock_ledgers` or `lock_ledgers == max_lock_ledgers`
+    is accepted. A period outside the range is rejected with
+    `Error::InvalidLockPeriod = 8` (appended after the existing variants;
+    existing error codes keep their numbers).
+  - Changing the bounds never affects vaults that already exist: their
+    `unlock_ledger` was fixed at deposit time, so a bounds change is
+    forward-looking only.
+  **Status (2026-09-29):** this is the specified model, not yet shipped.
+  The contract still carries the single `default_timelock_ledgers` field
+  (`storage.rs`, `contract.rs`); `Error::InvalidLockPeriod` does not exist
+  yet. E02-02 through E02-12 must land, with the boundary tests, before
+  this tag may move to VERIFIED — until then, do not cite FR-2 as
+  describing deployed behavior.
 - **FR-3 (DECIDED).** Withdrawal is single-step (deposit → wait → withdraw),
   not the two-step initiate/claim pattern considered earlier. Partial
   withdrawal is supported — a user may withdraw less than a vault's full
