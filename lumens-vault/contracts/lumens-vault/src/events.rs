@@ -52,6 +52,18 @@ pub struct NewAdminEvent {
     pub new_admin: Address,
 }
 
+/// Published by update_config after a successful bounds write. The admin is
+/// the only #[topic]; the bounds are data fields, keeping the topic count at
+/// one regardless of how the SDK's default topic naming resolves (see the
+/// UNVERIFIED note above).
+#[contractevent]
+pub struct ConfigUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
+}
+
 #[contractevent]
 pub struct DepositEvent {
     #[topic]
