@@ -10,7 +10,7 @@ console.log(`Starting flaky test detection. Running test suite ${N} times...`);
 for (let i = 0; i < N; i++) {
   console.log(`\n--- Iteration ${i + 1}/${N} ---`);
   try {
-    execSync('npm run test -- --reporter=json --outputFile=test-out.json', { stdio: 'inherit' });
+    execSync('npm run test - -reporter=json --outputFile=test-out.json', { stdio: 'inherit' });
   } catch (err) {
     // Tests failed, which is expected for flaky tests. We'll parse the JSON.
     console.log('Test suite had failures in this iteration.');
@@ -58,7 +58,7 @@ for (const [testName, counts] of Object.entries(results)) {
 }
 
 if (!flakyFound) {
-  summary = '### ✅ no Flaky Tests Detected\n\nAll tests passed consistently across all iterations.\n';
+  summary = '### ✅ No Flaky Tests Detected\n\nAll tests passed consistently across all iterations.\n';
   console.log('\nNo flaky tests detected.');
 }
 
