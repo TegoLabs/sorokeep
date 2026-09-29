@@ -245,3 +245,99 @@ fn test_real_upgrade_and_state_migration() {
     // round-trip, actually happened.
     assert!(migrated.last_touched_ledger > 0);
 }
+
+// ---------------------------------------------------------------------
+// Pause / unpause authorization (#811 / E04-03).
+//
+// `pause` and `unpause` take no caller argument: they load the stored
+// admin and call `admin.require_auth()`. A "non-admin caller" is therefore
+// modelled by authorizing ONLY some other address for the call. The
+// admin's `require_auth` then fails with the host's auth error, which the
+// tests below assert specifically (`Error(Auth, InvalidAction)`), not just
+// "any failure".
+// ---------------------------------------------------------------------
+
+/// Authorize only `attacker` for `fn_name` on the vault, replacing any
+/// earlier blanket `mock_all_auths`. The stored admin is NOT authorized.
+fn authorize_only_attacker(env: &Env, vault: &Address, attacker: &Address, fn_name: &str) {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    env.mock_auths(&[MockAuth {
+        address: attacker,
+        invoke: &MockAuthInvoke {
+            contract: vault,
+            fn_name,
+            args: ().into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+}
+
+#[test]
+fn test_admin_can_pause_and_unpause_and_is_paused_reflects_each() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    assert!(!vault_client.is_paused());
+
+    vault_client.pause();
+    assert!(vault_client.is_paused());
+
+    vault_client.unpause();
+    assert!(!vault_client.is_paused());
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_non_admin_cannot_pause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    authorize_only_attacker(&env, &vault_client.address, &attacker, "pause");
+    vault_client.pause();
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_non_admin_cannot_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    // Legitimately paused first, so there is something to unpause.
+    vault_client.pause();
+    assert!(vault_client.is_paused());
+
+    authorize_only_attacker(&env, &vault_client.address, &attacker, "unpause");
+    vault_client.unpause();
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_non_admin_cannot_pause_while_already_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    vault_client.pause();
+    assert!(vault_client.is_paused());
+
+    // Already paused: a non-admin must still be rejected on auth,
+    // not silently succeed as a no-op.
+    authorize_only_attacker(&env, &vault_client.address, &attacker, "pause");
+    vault_client.pause();
+}
