@@ -49,6 +49,28 @@ jobs:
     - name: Build Project
       run: npm run build
 
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32v1-none
+
+    - name: Install Stellar CLI
+      run: cargo install --locked stellar-cli --features opt
+
+    - name: Build Contract to Wasm
+      run: stellar contract build
+
+    - name: Verify Exported Functions
+      run: |
+        WASM=$(find target/wasm32v1-none/release -name '*.wasm' | head -n 1)
+        echo "Wasm artifact: $WASM"
+        echo "Wasm size: $(stat -c%s "$WASM") bytes"
+        stellar contract info interface --wasm "$WASM" | tee /tmp/interface.txt
+        grep -q "get_lock_bounds" /tmp/interface.txt
+
+    - name: Run Contract Tests
+      run: cargo test
+
     - name: Bundle Size Check
       # Advisory only for now: this compares against the last *published* npm
       # version, which predates a large batch of legitimate feature merges
