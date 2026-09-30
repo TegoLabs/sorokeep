@@ -31,7 +31,8 @@ pub enum VaultConfig {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfigV1 {
-    pub default_timelock_ledgers: u32,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
 }
 
 #[contracttype]

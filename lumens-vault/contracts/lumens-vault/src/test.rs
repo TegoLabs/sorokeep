@@ -30,8 +30,8 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
 
 /// `env.register` now takes constructor args directly, since `initialize`
 /// was replaced by `__constructor` (see contract.rs change log item 1).
-fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVaultClient<'static> {
-    let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
+fn setup(env: &Env, admin: &Address, min_lock_ledgers: u32, max_lock_ledgers: u32) -> LumensVaultClient<'static> {
+    let vault_id = env.register(LumensVault, (admin, min_lock_ledgers, max_lock_ledgers));
     LumensVaultClient::new(env, &vault_id)
 }
 
@@ -43,7 +43,7 @@ fn test_deposit_and_withdraw() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -51,7 +51,7 @@ fn test_deposit_and_withdraw() {
 
     vault_client.add_asset(&token_client.address);
 
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
     assert_eq!(returned_vault_id, 1);
 
     assert_eq!(token_client.balance(&user), 900);
@@ -82,17 +82,17 @@ fn test_deposit_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0);
+    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0, &10);
     assert!(zero_res.is_err());
 
-    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100);
+    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100, &10);
     assert!(negative_res.is_err());
 }
 
@@ -108,14 +108,14 @@ fn test_withdraw_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &-200);
@@ -138,14 +138,14 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let count_key = DataKey::UserVaultCount(user.clone());
     let ttl_after_first_deposit =
@@ -156,7 +156,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     env.ledger()
         .with_mut(|l| l.sequence_number += ttl_after_first_deposit - 1000);
 
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let ttl_after_second_deposit =
         env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
@@ -207,7 +207,7 @@ fn test_real_upgrade_and_state_migration() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -216,7 +216,7 @@ fn test_real_upgrade_and_state_migration() {
 
     // 1. Write real state through the OLD contract's own deposit logic —
     //    not a raw storage poke.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500, &10);
     assert_eq!(returned_vault_id, 1);
     assert_eq!(vault_client.version(), 1);
 
