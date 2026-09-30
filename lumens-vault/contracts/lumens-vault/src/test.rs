@@ -30,8 +30,8 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
 
 /// `env.register` now takes constructor args directly, since `initialize`
 /// was replaced by `__constructor` (see contract.rs change log item 1).
-fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVaultClient<'static> {
-    let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
+fn setup(env: &Env, admin: &Address, min_lock_ledgers: u32, max_lock_ledgers: u32) -> LumensVaultClient<'static> {
+    let vault_id = env.register(LumensVault, (admin, min_lock_ledgers, max_lock_ledgers));
     LumensVaultClient::new(env, &vault_id)
 }
 
@@ -43,7 +43,7 @@ fn test_deposit_and_withdraw() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 20);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -51,18 +51,20 @@ fn test_deposit_and_withdraw() {
 
     vault_client.add_asset(&token_client.address);
 
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
     assert_eq!(returned_vault_id, 1);
 
     assert_eq!(token_client.balance(&user), 900);
     assert_eq!(token_client.balance(&vault_client.address), 100);
 
-    // Timelock not yet expired.
+    // Timelock not yet expired for the 10-ledger vault (unlock at ledger+10).
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &50);
     assert!(res.is_err());
 
+    // Advance past the shorter lock (10 ledgers) but not the longer (20 ledgers).
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
+    // Withdrawal from the 10-ledger vault should succeed now.
     vault_client.withdraw(&user, &token_client.address, &1, &50);
 
     assert_eq!(token_client.balance(&user), 950);
@@ -71,6 +73,10 @@ fn test_deposit_and_withdraw() {
     // New: the view function this pass added actually reflects the state.
     let entry = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(entry.amount, 50);
+
+    // The other vault (with 20-ledger lock) should still be locked.
+    let res2 = vault_client.try_withdraw(&user, &token_client.address, &1, &50);
+    assert!(res2.is_err(), "Second vault should still be locked with TimelockNotExpired");
 }
 
 #[test]
@@ -82,17 +88,17 @@ fn test_deposit_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 20);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0);
+    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0, &10);
     assert!(zero_res.is_err());
 
-    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100);
+    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100, &10);
     assert!(negative_res.is_err());
 }
 
@@ -108,14 +114,14 @@ fn test_withdraw_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 20);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &-200);
@@ -138,14 +144,14 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 20);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let count_key = DataKey::UserVaultCount(user.clone());
     let ttl_after_first_deposit =
@@ -156,7 +162,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     env.ledger()
         .with_mut(|l| l.sequence_number += ttl_after_first_deposit - 1000);
 
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let ttl_after_second_deposit =
         env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
@@ -165,6 +171,70 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
         ttl_after_second_deposit > 1000,
         "UserVaultCount TTL was not refreshed on the second deposit — it would archive soon"
     );
+}
+
+#[test]
+fn test_fr4_same_asset_different_locks_independence() {
+    // FR-4: Two deposits of the same asset with different lock_ledgers
+    // produce two vaults with different unlock_ledger values.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let vault_client = setup(&env, &admin, 10, 30);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &200);
+    vault_client.add_asset(&token_client.address);
+
+    // First deposit with 10-ledger lock
+    let vault1_id = vault_client.deposit(&user, &token_client.address, &100, &10);
+    assert_eq!(vault1_id, 1);
+
+    // Second deposit with 30-ledger lock
+    let vault2_id = vault_client.deposit(&user, &token_client.address, &100, &30);
+    assert_eq!(vault2_id, 2);
+
+    // Verify both vaults have different unlock_ledger values
+    let entry1 = vault_client.get_vault(&user, &token_client.address, &1);
+    let entry2 = vault_client.get_vault(&user, &token_client.address, &2);
+    assert_ne!(entry1.unlock_ledger, entry2.unlock_ledger,
+        "Two vaults with different locks must have different unlock_ledger values");
+
+    // Verify the 10-ledger vault unlocks first
+    assert!(entry1.unlock_ledger < entry2.unlock_ledger,
+        "Shorter lock should have earlier unlock_ledger");
+
+    // Advance past the shorter lock (10) but not the longer (30)
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    // Withdraw from the 10-ledger vault - should succeed
+    vault_client.withdraw(&user, &token_client.address, &1, &50);
+    assert_eq!(token_client.balance(&user), 150);
+
+    // The 30-ledger vault should still be locked
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &50);
+    assert!(res.is_err(), "Shorter-lock vault should be withdrawable, longer-lock vault should still be rejected with TimelockNotExpired");
+
+    // Verify the 30-ledger vault still has its original amount
+    let entry2_after = vault_client.get_vault(&user, &token_client.address, &2);
+    assert_eq!(entry2_after.amount, 100);
+
+    // Advance past both locks
+    env.ledger().with_mut(|l| l.sequence_number += 21); // total +32, past both 10 and 30
+
+    // Withdraw from the 30-ledger vault - should now succeed
+    vault_client.withdraw(&user, &token_client.address, &2, &75);
+    assert_eq!(token_client.balance(&user), 225);
+
+    // Verify both vaults are now empty
+    let entry1_final = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry1_final.amount, 0);
+    let entry2_final = vault_client.get_vault(&user, &token_client.address, &2);
+    assert_eq!(entry2_final.amount, 25);
 }
 
 // ---------------------------------------------------------------------
@@ -207,7 +277,7 @@ fn test_real_upgrade_and_state_migration() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 20);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -216,7 +286,7 @@ fn test_real_upgrade_and_state_migration() {
 
     // 1. Write real state through the OLD contract's own deposit logic —
     //    not a raw storage poke.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500, &10);
     assert_eq!(returned_vault_id, 1);
     assert_eq!(vault_client.version(), 1);
 
