@@ -78,3 +78,11 @@ pub struct UpgradeEvent {
     pub admin: Address,
     pub new_wasm_hash: BytesN<32>,
 }
+
+#[contractevent]
+pub struct ConfigUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
+}
