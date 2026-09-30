@@ -470,9 +470,9 @@ fn test_update_config_publishes_config_updated_event() {
     let admin = Address::generate(&env);
     let vault_client = setup(&env, &admin, MIN_LOCK, MAX_LOCK);
 
-    let events_before = env.events().all().len();
+    let events_before = env.events().all().events().len();
     vault_client.update_config(&30, &300);
-    let events_after = env.events().all().len();
+    let events_after = env.events().all().events().len();
 
     assert_eq!(
         events_after,
