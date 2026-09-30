@@ -1,9 +1,13 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
+// The crate is #![no_std], but the test harness links std. Import it so the
+// constructor-trap tests below can use std::panic::catch_unwind.
+extern crate std;
+
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{
-    testutils::{storage::Persistent, Address as _, Ledger},
+    testutils::{storage::Persistent, Address as _, Events, Ledger},
     Address, BytesN, Env,
 };
 
