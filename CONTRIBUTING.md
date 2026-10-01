@@ -45,6 +45,7 @@ You need:
 - Node.js 22 or later
 - npm
 - Git
+- [gitleaks](https://github.com/gitleaks/gitleaks) (for pre-commit secret scanning, e.g., `brew install gitleaks`)
 
 Clone and install:
 
