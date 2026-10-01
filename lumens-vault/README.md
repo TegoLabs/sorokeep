@@ -33,6 +33,7 @@ lumens-vault/
 ├── docs/
 │   ├── TECH_SPEC.md               what the system must do
 │   ├── SYSTEM_DESIGN.md           how the pieces are arranged
+│   ├── testing.md                 clean checkout → green contract test suite, verified
 │   └── backlog/                   the issue backlog and the requirements register
 ├── CONTRIBUTING.md
 └── README.md
@@ -43,10 +44,9 @@ and built out by the backlog's E07 onwards.
 
 ## Requirements
 
-- **Rust 1.85 or later.** `soroban-sdk` 28's dependency tree needs `edition2024`; an older
-  toolchain fails on a transitive dependency before reaching this project's own code.
-- The **`wasm32v1-none`** target — the only target the Soroban runtime supports.
-- **`stellar-cli`**, reasonably current.
+- [Rust 1.85 or later.](https://www.rust-lang.org/tools/install)
+- The `wasm32v1-none` target — the only target the Soroban runtime supports.
+- [`stellar-cli` `23.1.0`](https://github.com/stellar/stellar-cli)
 
 ```powershell
 rustup target add wasm32v1-none
@@ -56,7 +56,7 @@ rustup target add wasm32v1-none
 
 The upgrade test imports the v2 fixture's compiled wasm via `contractimport!`, which resolves
 at **compile** time. The fixture must therefore be built before the main crate's tests, or
-`cargo test` fails on a missing file:
+cargo test` fails on a missing file:
 
 ```powershell
 cd contracts\lumens-vault-v2-fixture
@@ -67,6 +67,10 @@ cargo test
 ```
 
 Expected: 5 tests, all passing.
+
+The full walkthrough — required toolchain versions, this command sequence with its
+actual output, what the fixture-ordering failure looks like when you skip step 1, and a
+troubleshooting table — is in [`docs/testing.md`](docs/testing.md).
 
 To build the contract itself to wasm:
 
@@ -87,12 +91,16 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. Two rules matter more than the 
    upgrade behaviour gets run more than once.
 2. **Verify against primary sources.** Soroban SDK behaviour, Sorokeep's CLI flags and
    third-party contract interfaces have each been stated incorrectly here at some point.
-   Where an issue asks you to check something, it is because a previous version of that claim
-   was wrong.
+Where an issue asks you to check something, it is because a previous version of that claim
+was wrong.
 
 Work is tracked as issues in the `sorokeep` repository under the `lumens-vault` label. The
 backlog is generated — see [`docs/backlog/`](docs/backlog/) for the requirements register,
 the epics, and the coverage matrix proving every requirement maps to at least one issue.
+
+## License
+
+Lumens Vault is licensed under the [MIT License](LICENSE).
 
 ## Relationship to Sorokeep
 

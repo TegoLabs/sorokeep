@@ -7,6 +7,7 @@ use soroban_sdk::{
     Address, BytesN, Env,
 };
 
+use crate::contract::Error;
 use crate::storage::DataKey;
 use crate::{LumensVault, LumensVaultClient};
 
@@ -28,8 +29,7 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
     )
 }
 
-/// `env.register` now takes constructor args directly, since `initialize`
-/// was replaced by `__constructor` (see contract.rs change log item 1).
+/// `env.register` passes constructor arguments directly to `__constructor`.
 fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVaultClient<'static> {
     let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
     LumensVaultClient::new(env, &vault_id)
@@ -38,6 +38,7 @@ fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVau
 #[test]
 fn test_deposit_and_withdraw() {
     let env = Env::default();
+    // blanket mock is fine: test is about core deposit/withdraw logic, not access control
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
@@ -68,16 +69,16 @@ fn test_deposit_and_withdraw() {
     assert_eq!(token_client.balance(&user), 950);
     assert_eq!(token_client.balance(&vault_client.address), 50);
 
-    // New: the view function this pass added actually reflects the state.
+    // The view reflects the remaining vault state after a partial withdrawal.
     let entry = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(entry.amount, 50);
 }
 
 #[test]
 fn test_deposit_rejects_non_positive_amount() {
-    // NEW — covers the fix in contract.rs change log item 2. Before this
-    // fix, neither of these guarded at all.
+    // Deposits reject zero and negative amounts before any token transfer.
     let env = Env::default();
+    // blanket mock is fine: test is about input validation, not access control
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
@@ -98,12 +99,11 @@ fn test_deposit_rejects_non_positive_amount() {
 
 #[test]
 fn test_withdraw_rejects_non_positive_amount() {
-    // NEW — this is the more important half of the fix: without the guard,
-    // a negative `amount` here would have skipped the insufficient-balance
-    // check and *inflated* the caller's recorded balance via
-    // `entry_v1.amount -= amount`. See contract.rs change log item 2 for
-    // the full walkthrough.
+    // Withdrawals reject non-positive amounts before mutating the recorded
+    // balance; otherwise a negative amount could inflate `entry_v1.amount`
+    // through `entry_v1.amount -= amount`.
     let env = Env::default();
+    // blanket mock is fine: test is about input validation, not access control
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
@@ -128,12 +128,12 @@ fn test_withdraw_rejects_non_positive_amount() {
 
 #[test]
 fn test_user_vault_count_ttl_is_extended_on_deposit() {
-    // NEW — covers contract.rs change log item 3. Before this fix,
-    // `UserVaultCount` was written once on a user's first deposit and never
-    // touched again, so it would archive on its own default schedule
-    // regardless of how active the user was — silently blocking every
+    // The user vault counter is refreshed on each deposit. Without this,
+    // `UserVaultCount` would archive on its default schedule regardless of
+    // how active the user was — silently blocking every
     // future deposit from that user once it did.
     let env = Env::default();
+    // blanket mock is fine: test is about storage TTL logic, not access control
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
@@ -164,6 +164,311 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     assert!(
         ttl_after_second_deposit > 1000,
         "UserVaultCount TTL was not refreshed on the second deposit — it would archive soon"
+    );
+}
+
+#[test]
+fn test_delisting_blocks_deposits_but_never_traps_existing_funds() {
+    // FR-11: An earlier version of this contract had the whitelist check on
+    // withdraw as well as deposit, which would have permanently trapped user
+    // funds the moment an admin delisted an asset. The fix was to omit the
+    // check on withdraw. This test is a permanent regression guard.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    
+    // Deposit while whitelisted
+    vault_client.add_asset(&token_client.address);
+    vault_client.deposit(&user, &token_client.address, &500);
+
+    // Delist the asset
+    vault_client.remove_asset(&token_client.address);
+
+    // Assert a new deposit of the delisted asset fails with AssetNotWhitelisted
+    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    assert_eq!(res, Err(Ok(crate::contract::Error::AssetNotWhitelisted)));
+
+    // Mature the lock
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    // Withdraw successfully
+    vault_client.withdraw(&user, &token_client.address, &1, &500);
+    assert_eq!(token_client.balance(&user), 1000);
+}
+
+// ---------------------------------------------------------------------
+// E05-06 — Pause semantics (FR-5, FR-10, NFR-2).
+//
+// FR-5 has two halves and both are pinned here:
+//
+//   1. While paused, deposits and withdrawals are rejected with
+//      Error::Paused — even a matured vault cannot be drained, so an
+//      admin cannot use a pause to move funds out.
+//   2. Pause is a circuit breaker, not a timelock override. It must
+//      never change any vault's unlock_ledger, so it can never be a
+//      backdoor to early access, and it must never lock funds
+//      permanently either — after unpause every vault is exactly where
+//      it was, on its original schedule.
+//
+// Authorization of pause/unpause itself is out of scope (E04-03).
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_deposit_fails_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.pause();
+    assert!(vault_client.is_paused());
+
+    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    assert_eq!(res, Err(Ok(Error::Paused)));
+
+    // The rejected deposit changed nothing: no tokens left the user, the
+    // contract holds nothing, and no vault was created.
+    assert_eq!(token_client.balance(&user), 1000);
+    assert_eq!(token_client.balance(&vault_client.address), 0);
+    assert_eq!(vault_client.get_user_vault_count(&user), 0);
+}
+
+#[test]
+fn test_withdraw_of_matured_vault_fails_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+
+    // Mature the vault: land exactly on unlock_ledger (the inclusive
+    // boundary pinned by E05-11), so the timelock alone would allow the
+    // withdrawal.
+    let unlock_ledger = vault_client
+        .get_vault(&user, &token_client.address, &1)
+        .unlock_ledger;
+    env.ledger()
+        .with_mut(|l| l.sequence_number = unlock_ledger);
+
+    vault_client.pause();
+
+    // Paused wins even over a matured vault. This is the half of FR-5
+    // that matters for user trust: a pause must not become a drain tool.
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &100);
+    assert_eq!(res, Err(Ok(Error::Paused)));
+
+    // The failed attempt changed nothing — balance neither dropped nor
+    // was inflated.
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 500);
+    assert_eq!(entry.unlock_ledger, unlock_ledger);
+    assert_eq!(token_client.balance(&user), 500);
+    assert_eq!(token_client.balance(&vault_client.address), 500);
+}
+
+#[test]
+fn test_deposit_and_withdraw_succeed_after_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.pause();
+    vault_client.unpause();
+    assert!(!vault_client.is_paused());
+
+    // Both operations work again after unpause — a pause must never lock
+    // funds permanently.
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    assert_eq!(returned_vault_id, 1);
+
+    let unlock_ledger = vault_client
+        .get_vault(&user, &token_client.address, &1)
+        .unlock_ledger;
+    env.ledger()
+        .with_mut(|l| l.sequence_number = unlock_ledger);
+
+    vault_client.withdraw(&user, &token_client.address, &1, &100);
+    assert_eq!(token_client.balance(&user), 1000);
+    assert_eq!(token_client.balance(&vault_client.address), 0);
+}
+
+#[test]
+fn test_pause_does_not_change_any_vaults_unlock_ledger() {
+    // The load-bearing half of FR-5: pause must never be a backdoor to
+    // early access. The unlock_ledger recorded at deposit time is the
+    // only thing that gates a withdrawal, so a pause/unpause cycle must
+    // leave it unchanged for every vault — not just one.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // Two vaults for the same user, deposited at different ledger
+    // sequences so their unlock_ledgers differ.
+    vault_client.deposit(&user, &token_client.address, &100);
+    env.ledger().with_mut(|l| l.sequence_number += 5);
+    vault_client.deposit(&user, &token_client.address, &50);
+
+    let unlock_ledger_vault_1 = vault_client
+        .get_vault(&user, &token_client.address, &1)
+        .unlock_ledger;
+    let unlock_ledger_vault_2 = vault_client
+        .get_vault(&user, &token_client.address, &2)
+        .unlock_ledger;
+    assert_ne!(unlock_ledger_vault_1, unlock_ledger_vault_2);
+
+    // A full pause/unpause cycle must not move either unlock_ledger.
+    vault_client.pause();
+    assert_eq!(
+        vault_client
+            .get_vault(&user, &token_client.address, &1)
+            .unlock_ledger,
+        unlock_ledger_vault_1
+    );
+    assert_eq!(
+        vault_client
+            .get_vault(&user, &token_client.address, &2)
+            .unlock_ledger,
+        unlock_ledger_vault_2
+    );
+
+    vault_client.unpause();
+    assert_eq!(
+        vault_client
+            .get_vault(&user, &token_client.address, &1)
+            .unlock_ledger,
+        unlock_ledger_vault_1
+    );
+    assert_eq!(
+        vault_client
+            .get_vault(&user, &token_client.address, &2)
+            .unlock_ledger,
+        unlock_ledger_vault_2
+    );
+
+    // And the original schedule still governs access, unchanged by the
+    // pause: vault 1 is at its unlock_ledger and pays out, vault 2 is
+    // not and is still rejected with TimelockNotExpired.
+    env.ledger()
+        .with_mut(|l| l.sequence_number = unlock_ledger_vault_1);
+    vault_client.withdraw(&user, &token_client.address, &1, &100);
+
+    let res = vault_client.try_withdraw(&user, &token_client.address, &2, &50);
+    assert_eq!(res, Err(Ok(Error::TimelockNotExpired)));
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &2);
+    assert_eq!(entry.amount, 50);
+    assert_eq!(entry.unlock_ledger, unlock_ledger_vault_2);
+    assert_eq!(token_client.balance(&user), 950);
+    assert_eq!(token_client.balance(&vault_client.address), 50);
+}
+
+// ---------------------------------------------------------------------
+// FR-9 regression guard — atomic constructor
+//
+// FR-9 replaced a two-step deploy+initialize flow with a single `__constructor`
+// that runs atomically during deployment. The critical property is that the
+// contract can never exist in a state where it has no admin: there is no window
+// between "contract deployed" and "admin assigned" that a front-runner could
+// exploit by calling `initialize` first and claiming the admin role.
+//
+// This test pins that property. If a future refactor reintroduces a separate
+// `initialize` entry point — even one protected by `require_auth` — it would
+// reopen the front-running window and be a CRITICAL regression. This test does
+// not cover that deploy-time authorization scenario (that is E06-04's concern);
+// it covers the atomicity invariant: all three instance storage keys (Admin,
+// State, Config) are present and correct immediately after registration, before
+// any other call has been made.
+#[test]
+fn test_constructor_writes_all_instance_keys_atomically() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let timelock_ledgers: u32 = 42;
+
+    // Register the contract with constructor args. No other call has been made
+    // yet — in particular, no deposit exists. This is the state we are testing.
+    let vault_client = setup(&env, &admin, timelock_ledgers);
+
+    // 1. Admin key: get_admin_address must return the exact address passed to
+    //    the constructor, with no separate initializer call required.
+    let stored_admin = vault_client.get_admin_address();
+    assert_eq!(
+        stored_admin, admin,
+        "get_admin_address should return the constructor-supplied admin immediately after deployment"
+    );
+
+    // 2. State key: is_paused must be false — the contract is live the moment
+    //    it is deployed, not in an uninitialized limbo where is_paused could
+    //    panic or return an unexpected value.
+    let paused = vault_client.is_paused();
+    assert!(
+        !paused,
+        "is_paused should be false immediately after deployment with no deposits"
+    );
+
+    // 3. Config key: the default_timelock_ledgers written by the constructor
+    //    must be visible without any additional setup call. We verify this
+    //    indirectly via deposit: the vault's unlock_ledger is computed as
+    //    `sequence + default_timelock_ledgers`, so if the config key was
+    //    missing or wrong the math would be off.
+    //
+    //    We set up the minimum required scaffolding (one whitelisted asset,
+    //    one minted balance) but make no assertion about the deposit itself —
+    //    the only thing being checked here is that the timelock comes from the
+    //    constructor value, proving Config was written atomically.
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&admin, &1);
+    vault_client.add_asset(&token_client.address);
+
+    let start_ledger = env.ledger().sequence();
+    let vault_id = vault_client.deposit(&admin, &token_client.address, &1);
+
+    let entry = vault_client.get_vault(&admin, &token_client.address, &vault_id);
+    assert_eq!(
+        entry.unlock_ledger,
+        start_ledger + timelock_ledgers,
+        "unlock_ledger should equal start_ledger + constructor timelock, \
+         proving Config was written atomically by __constructor"
     );
 }
 
@@ -201,6 +506,7 @@ fn install_new_wasm(env: &Env) -> BytesN<32> {
 #[test]
 fn test_real_upgrade_and_state_migration() {
     let env = Env::default();
+    // blanket mock is fine: test is about upgrades and migration, not access control
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.sequence_number = 1000);
 
@@ -244,4 +550,102 @@ fn test_real_upgrade_and_state_migration() {
     // all is part of the proof that migration, not just a raw byte
     // round-trip, actually happened.
     assert!(migrated.last_touched_ledger > 0);
+}
+
+// ---------------------------------------------------------------------
+// Withdraw ordering (#837 / E05-15).
+//
+// DELIBERATE ORDERING: `withdraw` writes the decremented vault balance to
+// storage BEFORE it calls `transfer` to move tokens out. This is not
+// incidental. Recording state first means the stored balance never lags
+// behind tokens that have already left the vault. Do not reorder these
+// two steps.
+//
+// The tests below pin the observable consequence: stored balance and token
+// balances stay mutually consistent on success, and a rejected withdrawal
+// (timelock, insufficient balance) moves no tokens and changes no balance.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_withdraw_success_keeps_stored_and_token_balances_consistent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    vault_client.withdraw(&user, &token_client.address, &1, &200);
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    let user_bal = token_client.balance(&user);
+    let vault_bal = token_client.balance(&vault_client.address);
+
+    assert_eq!(entry.amount, 300);
+    // Stored balance matches what the vault actually holds.
+    assert_eq!(vault_bal, entry.amount);
+    assert_eq!(user_bal, 700);
+    // No tokens created or destroyed.
+    assert_eq!(user_bal + vault_bal, 1000);
+}
+
+#[test]
+fn test_withdraw_timelock_failure_moves_no_tokens_and_changes_no_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+
+    // Timelock (10 ledgers) has not elapsed.
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &200);
+    assert!(res.is_err());
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 500);
+    assert_eq!(token_client.balance(&user), 500);
+    assert_eq!(token_client.balance(&vault_client.address), 500);
+}
+
+#[test]
+fn test_withdraw_insufficient_balance_moves_no_tokens_and_changes_no_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    // Timelock has elapsed, but the request exceeds the deposited balance.
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &600);
+    assert!(res.is_err());
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 500);
+    assert_eq!(token_client.balance(&user), 500);
+    assert_eq!(token_client.balance(&vault_client.address), 500);
 }

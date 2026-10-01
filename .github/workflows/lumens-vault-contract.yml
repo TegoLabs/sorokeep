@@ -1,0 +1,42 @@
+name: Lumens Vault Contract CI
+
+# Lives at the repo root because GitHub only reads .github/workflows/ there.
+# The path filters keep it off sorokeep's own changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lumens-vault/contracts/**'
+      - '.github/workflows/lumens-vault-contract.yml'
+  pull_request:
+    paths:
+      - 'lumens-vault/contracts/**'
+      - '.github/workflows/lumens-vault-contract.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lumens-vault/contracts/lumens-vault
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lumens-vault/contracts/lumens-vault
+
+      # cargo test only, deliberately. `cargo fmt --check` and
+      # `cargo clippy -D warnings` both fail on the tree as it stands (a
+      # module-ordering diff in lib.rs, a needless borrow and a single-pattern
+      # match in contract.rs). Adding them now would put every contributor's PR
+      # in the red for reasons unrelated to their change, and the fmt pass would
+      # rewrite lib.rs while ~15 conflicted PRs are still queued against it.
+      # They go in once the backlog is drained.
+      - run: cargo test

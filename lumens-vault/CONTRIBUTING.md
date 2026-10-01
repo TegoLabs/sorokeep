@@ -6,7 +6,7 @@ project already made once and doesn't want to make again.
 
 ## Where work comes from
 
-All work is tracked as GitHub issues in the `sorokeep` repository, labeled
+All work is tracked as GitHub issues in the [`sorokeep` repository](https://github.com/TegoLabs/sorokeep/issues?q=is%3Aissue+label%3Alumens-vault), labeled
 `lumens-vault`, grouped into milestones. **Every issue has an Acceptance
 Criteria checklist and a Non-Goals section.** Both are load-bearing:
 
@@ -53,11 +53,14 @@ You'll need:
 - The `wasm32v1-none` target
 - `stellar-cli`, reasonably current
 - Node.js, for anything under the eventual app-data/frontend components
-  (see `SYSTEM_DESIGN.md` — these don't fully exist yet)
+  (see [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) — these don't fully exist yet)
 
 Build and test commands are in [`README.md`](README.md). Note the build order: the
 v2 fixture crate must be compiled before `cargo test`, because the upgrade test
-resolves its wasm at compile time.
+resolves its wasm at compile time. The verified step-by-step — toolchain versions,
+the exact PowerShell sequence from clean checkout to green suite, and the actual
+failure output if you skip the fixture build — is in
+[`docs/testing.md`](docs/testing.md).
 
 ## Making a PR
 
@@ -82,7 +85,7 @@ than the issue asked.
 
 ## Code of conduct and security
 
-This repo's `CODE_OF_CONDUCT.md` applies here too. For security issues,
-follow `SECURITY.md`'s disclosure process — do not open a public issue for
+This repo's [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) applies here too. For security issues,
+follow [`SECURITY.md`](../SECURITY.md)'s disclosure process — do not open a public issue for
 a suspected vulnerability, especially anything touching the contract's
 fund-safety logic.
