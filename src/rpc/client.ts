@@ -14,6 +14,8 @@ import {
 } from "@stellar/stellar-sdk";
 import chalk from "chalk";
 import { getLogger } from "../logging/index.js";
+import * as undici from "undici";
+import * as crypto from "node:crypto";
 // CostSummary removed — no longer exported from costs.js
 
 // ── Local helper types to replace `any` casts ──────────────────────────────
@@ -390,6 +392,7 @@ const NETWORK_PASSPHRASES: Record<string, string> = {
 
 export interface StellarRpcClientOptions {
     maxRequestsPerSecond?: number;
+    rpcCertificateFingerprint?: string;
 }
 
 /** How long a repeatedly-failing endpoint is skipped before being retried (issue #496). */

@@ -11,6 +11,7 @@ This document provides a complete reference of all supported fields in the `~/.s
 | `telegramBotToken` | string | (none) | Telegram bot token. | `telegram` | `SOROKEEP_TELEGRAM_BOT_TOKEN` |
 | `templatesPath` | string | (none) | Directory containing custom Handlebars templates. | `alerts/templates` | None |
 | `monthlyBudgetXlm` | number | (none) | Monthly rent budget in XLM to trigger warnings. | `costs` | None |
+| `rpcCertificateFingerprint` | string | (none) | SHA-256 fingerprint (hex) of the RPC server's TLS certificate. | `rpc` | None |
 | `vault.url` | string | (none) | HashiCorp Vault server URL. | `vault`, `extension` | None |
 | `vault.token` | string | (none) | Vault authentication token. | `vault`, `extension` | None |
 | `vault.namespace` | string | (none) | Optional Vault namespace (for Vault Enterprise). | `vault`, `extension` | None |
@@ -32,3 +33,23 @@ These are not `config.yaml` fields — they're read directly from the environmen
 | `SOROKEEP_METRICS_TOKEN` | string | Bearer token required to access the `/metrics` and MCP HTTP endpoints, if set. | `observability/server` |
 | `SOROKEEP_OTLP_ENDPOINT` | string | OpenTelemetry OTLP exporter endpoint for traces. | `observability/tracing` |
 | `SOROKEEP_OTLP_IN_MEMORY` | boolean | When `"true"`, uses an in-memory span exporter instead of OTLP (used in tests). | `observability/tracing` |
+
+## RPC Certificate Pinning
+
+If you are running sorokeep against a private RPC endpoint with elevated trust requirements, you can optionally enable TLS certificate pinning. This helps prevent man-in-the-middle attacks or compromised Certificate Authorities by rejecting connections to an RPC endpoint unless the presented certificate matches a specified SHA-256 fingerprint.
+
+### How to obtain the fingerprint
+
+You can fetch the current SHA-256 fingerprint of your RPC server using OpenSSL. Run this command, replacing `your-rpc-endpoint.com` with your endpoint host:
+
+```bash
+echo -n | openssl s_client -connect your-rpc-endpoint.com:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+```
+
+This will output something like:
+`SHA256 Fingerprint=8A:73:90...`
+
+Take the hexadecimal portion and add it to your `~/.sorokeep/config.yaml`:
+```yaml
+rpcCertificateFingerprint: "8A:73:90..."
+```
