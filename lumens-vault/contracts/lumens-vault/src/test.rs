@@ -1,10 +1,12 @@
 #![cfg(test)]
 #![allow(deprecated)]
 
+extern crate std;
+
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{
     testutils::{storage::Persistent, Address as _, Ledger, MockAuth, MockAuthInvoke},
-    Address, BytesN, ConversionError, Env, IntoVal, InvokeError,
+    Address, BytesN, ConversionError, Env, IntoVal, InvokeError, TryFromVal,
 };
 
 use crate::contract::Error;
@@ -183,7 +185,7 @@ fn test_delisting_blocks_deposits_but_never_traps_existing_funds() {
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&user, &1000);
-    
+
     // Deposit while whitelisted
     vault_client.add_asset(&token_client.address);
     vault_client.deposit(&user, &token_client.address, &500);
@@ -201,6 +203,71 @@ fn test_delisting_blocks_deposits_but_never_traps_existing_funds() {
     // Withdraw successfully
     vault_client.withdraw(&user, &token_client.address, &1, &500);
     assert_eq!(token_client.balance(&user), 1000);
+}
+
+#[test]
+fn test_every_event_stays_within_topic_ceiling() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+    let vault_address = vault_client.address.clone();
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+
+    vault_client.pause();
+    vault_client.unpause();
+    vault_client.add_asset(&token_client.address);
+    let vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    env.ledger().with_mut(|ledger| ledger.sequence_number += 11);
+    vault_client.withdraw(&user, &token_client.address, &vault_id, &40);
+    vault_client.remove_asset(&token_client.address);
+    vault_client.transfer_admin(&new_admin);
+
+    let new_wasm_hash = install_new_wasm(&env);
+    vault_client.upgrade(&new_wasm_hash);
+
+    let vault_events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .into_iter()
+        .filter(|(contract_id, _, _)| contract_id == &vault_address)
+        .collect();
+    let expected_events = [
+        ("PauseEvent", 2),
+        ("UnpauseEvent", 2),
+        ("WhitelistEvent", 2),
+        ("DepositEvent", 3),
+        ("WithdrawEvent", 3),
+        ("DelistEvent", 2),
+        ("NewAdminEvent", 2),
+        ("UpgradeEvent", 2),
+    ];
+
+    assert_eq!(vault_events.len(), expected_events.len());
+    for ((event_name, expected_topic_count), (_, topics, _)) in
+        expected_events.iter().zip(&vault_events)
+    {
+        std::println!("{event_name}: topics={topics:?}");
+        assert_eq!(
+            topics.len(),
+            *expected_topic_count,
+            "unexpected topic count for {event_name}"
+        );
+        assert!(topics.len() <= 4, "{event_name} exceeds the 4-topic ceiling");
+    }
+
+    let deposit_data: (u32, i128) =
+        <(u32, i128)>::try_from_val(&env, &vault_events[3].2).unwrap();
+    assert_eq!(deposit_data, (vault_id, 100));
+    let withdraw_data: (u32, i128) =
+        <(u32, i128)>::try_from_val(&env, &vault_events[4].2).unwrap();
+    assert_eq!(withdraw_data, (vault_id, 40));
 }
 
 // ---------------------------------------------------------------------

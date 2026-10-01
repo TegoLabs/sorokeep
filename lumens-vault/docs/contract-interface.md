@@ -84,18 +84,18 @@ Append-only. Never renumber.
 
 ## Events
 
-**UNVERIFIED topic layout.** `events.rs` records that no event sets `#[contractevent(topics = [...])]`, so the macro's default naming applies and whether an implicit name topic is prepended has not been checked. Fill the "Topics as emitted" column from the E05-08 test / a real emission before freezing. The "declared" columns below come from source.
+The event topic layout is asserted by `test_every_event_stays_within_topic_ceiling` using `soroban-sdk` 28.0.0. Bare `#[contractevent]` declarations prepend an event-name topic, followed by fields marked `#[topic]`. The test emits every event, prints each raw topic vector, and asserts both the exact count and the four-topic ceiling.
 
-| Event | Declared `#[topic]` fields | Data fields | Emitted by | Topics as emitted |
-|---|---|---|---|---|
-| PauseEvent | admin: Address | — | pause | `<FILL>` |
-| UnpauseEvent | admin: Address | — | unpause | `<FILL>` |
-| WhitelistEvent | admin: Address | asset: Address | add_asset | `<FILL>` |
-| DelistEvent | admin: Address | asset: Address | remove_asset | `<FILL>` |
-| NewAdminEvent | admin: Address | new_admin: Address | transfer_admin | `<FILL>` |
-| DepositEvent | from: Address, asset: Address | vault_id: u32, amount: i128 | deposit | `<FILL>` |
-| WithdrawEvent | to: Address, asset: Address | vault_id: u32, amount: i128 | withdraw | `<FILL>` |
-| UpgradeEvent | admin: Address | new_wasm_hash: BytesN<32> | upgrade | `<FILL>` |
-| ConfigUpdatedEvent `[NOT PRESENT IN SNAPSHOT — E02-09]` | admin | min_lock_ledgers, max_lock_ledgers | update_config | `<FILL>` |
+| Event | Topics as emitted | Count | Data fields | Emitted by |
+|---|---|---:|---|---|
+| PauseEvent | event name, `admin` | 2 | — | `pause` |
+| UnpauseEvent | event name, `admin` | 2 | — | `unpause` |
+| WhitelistEvent | event name, `admin` | 2 | `asset` | `add_asset` |
+| DelistEvent | event name, `admin` | 2 | `asset` | `remove_asset` |
+| NewAdminEvent | event name, `admin` | 2 | `new_admin` | `transfer_admin` |
+| DepositEvent | event name, `from`, `asset` | 3 | `vault_id`, `amount` | `deposit` |
+| WithdrawEvent | event name, `to`, `asset` | 3 | `vault_id`, `amount` | `withdraw` |
+| UpgradeEvent | event name, `admin` | 2 | `new_wasm_hash` | `upgrade` |
+| ConfigUpdatedEvent `[NOT PRESENT IN THIS CONTRACT VERSION]` | — | — | — | `update_config` emits no event |
 
-Consequence for the backend: `asset` is data (not a topic) on WhitelistEvent and DelistEvent, so the current whitelist must be derived by decoding every such event; it cannot be filtered by topic. `update_config` emits nothing in the snapshot.
+`asset` is data (not a topic) on WhitelistEvent and DelistEvent, so the current whitelist must be derived by decoding those events; it cannot be filtered by topic. DepositEvent and WithdrawEvent likewise keep the high-cardinality `vault_id` and `amount` in data rather than topics. No event exceeds the four-topic ceiling.
