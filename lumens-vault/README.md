@@ -60,7 +60,7 @@ Use the test script, which handles the fixture build order automatically:
 ./scripts/test-contract.ps1
 ```
 
-Expected: 8 tests, all passing.
+Expected: 18 tests, all passing.
 
 **Why a script?** The upgrade test imports the v2 fixture's compiled wasm via `contractimport!`,
 which resolves at **compile** time. The fixture must be built first, or the build fails with

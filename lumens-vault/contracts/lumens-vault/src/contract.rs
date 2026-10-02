@@ -29,7 +29,8 @@ pub enum Error {
     TimelockNotExpired = 5,
     VaultNotFound = 6,
     InvalidAmount = 7,
-    InvalidLockPeriod = 8,
+VaultIdOverflow = 8,
+    InvalidLockPeriod = 9,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280; // 86,400s / 5s-per-ledger
@@ -243,7 +244,9 @@ impl LumensVault {
             .persistent()
             .get(&vault_count_key)
             .unwrap_or(0);
-        let new_vault_id = current_count + 1;
+        let new_vault_id = current_count
+            .checked_add(1)
+            .ok_or(Error::VaultIdOverflow)?;
         env.storage()
             .persistent()
             .set(&vault_count_key, &new_vault_id);
