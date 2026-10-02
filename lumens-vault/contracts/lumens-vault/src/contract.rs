@@ -68,20 +68,18 @@ impl LumensVault {
     // Note: `///` doc comments on contract functions are embedded in the wasm's
     // spec metadata and are paid for in rent forever. Keep them to one line and
     // put the reasoning in `//` comments like this one.
-    pub fn __constructor(env: Env, admin: Address, default_timelock_ledgers: u32) {
+    pub fn __constructor(env: Env, admin: Address, min_lock_ledgers: u32, max_lock_ledgers: u32) {
         admin.require_auth();
+
+        if let Err(e) = Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers) {
+            soroban_sdk::panic_with_error!(env, e);
+        }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
 
-        // Validate the initial bounds with the same helper `update_config`
-        // uses, so the constructor and the admin path can never drift apart.
-        // A zero minimum or an inverted range is rejected here with the same
-        // error a later `update_config` call would return.
-        Self::validate_lock_bounds(default_timelock_ledgers, default_timelock_ledgers)
-            .expect("invalid default timelock");
-
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -197,7 +195,8 @@ impl LumensVault {
         Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers)?;
 
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers: max_lock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -266,7 +265,7 @@ impl LumensVault {
         let unlock_ledger = env
             .ledger()
             .sequence()
-            .checked_add(config.default_timelock_ledgers)
+            .checked_add(config.max_lock_ledgers)
             .ok_or(Error::InvalidLockPeriod)?;
 
         let vault_entry = VaultEntry::V1(VaultEntryV1 {
@@ -427,6 +426,16 @@ impl LumensVault {
 
     // --- Internal helpers ---
 
+    fn validate_lock_bounds(min_lock_ledgers: u32, max_lock_ledgers: u32) -> Result<(), Error> {
+        if min_lock_ledgers == 0 {
+            return Err(Error::InvalidLockPeriod);
+        }
+        if max_lock_ledgers < min_lock_ledgers {
+            return Err(Error::InvalidLockPeriod);
+        }
+        Ok(())
+    }
+
     fn get_admin(env: &Env) -> Result<Address, Error> {
         env.storage()
             .instance()
@@ -446,19 +455,6 @@ impl LumensVault {
         match config {
             VaultConfig::V1(c) => Ok(c),
         }
-    }
-
-    /// Shared bounds check used by both the constructor and `update_config`.
-    /// Rejects a zero minimum and an inverted range with the same error the
-    /// constructor uses, so the two paths cannot diverge.
-    fn validate_lock_bounds(min_lock_ledgers: u32, max_lock_ledgers: u32) -> Result<(), Error> {
-        if min_lock_ledgers == 0 {
-            return Err(Error::InvalidAmount);
-        }
-        if max_lock_ledgers < min_lock_ledgers {
-            return Err(Error::InvalidAmount);
-        }
-        Ok(())
     }
 
     fn check_paused(env: &Env) -> Result<(), Error> {
