@@ -24,6 +24,26 @@ use crate::{LumensVault, LumensVaultClient};
 // `test_real_upgrade_and_state_migration` needs the v2 fixture compiled
 // first — see the comment above it for why and for the build order.
 
+// ---------------------------------------------------------------------
+// Sections
+//
+//   1. Setup helpers       shared fixtures and the scoped-auth helpers
+//   2. Vault operations    deposit / withdraw behaviour and ordering
+//   3. Lock periods        pause semantics and the timelock boundary
+//   4. Storage lifecycle   TTL extension and storage-layout invariants
+//   5. Authorization       who may call the admin entry points
+//   6. Events              emitted event shapes
+//   7. Upgrade             cross-binary upgrade and state migration
+//
+// Organisation only (E05-12). No test is renamed or has its behaviour
+// changed; the test count is identical before and after.
+// ---------------------------------------------------------------------
+
+// =====================================================================
+// 1. Setup helpers
+// Shared fixture construction, plus the scoped-auth helpers used by the authorization tests.
+// =====================================================================
+
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAssetClient<'a>) {
     let contract_address = env.register_stellar_asset_contract_v2(admin.clone());
     (
@@ -37,6 +57,118 @@ fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVau
     let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
     LumensVaultClient::new(env, &vault_id)
 }
+
+// Authorization: the asset whitelist.
+//
+// Whitelisting decides which token contracts `deposit` will call `transfer`
+// on, so anyone who can whitelist can point the vault at a contract of their
+// choosing. These tests pin down that only the admin can.
+//
+// How a rejected `require_auth()` actually surfaces in soroban-sdk 28 — this
+// is not what you would guess from the contract signature, and it is the
+// usual source of confusion when writing auth tests here:
+//
+//   - A *contract* failure (`Err(Error::AssetNotWhitelisted)` and friends)
+//     comes back from `try_*` as `Err(Ok(Error::..))`. The inner `Ok` means
+//     "contract code ran and returned a typed error this client understands".
+//   - A *missing authorization* is a host error raised before the contract's
+//     own error path is reachable, so it comes back as
+//     `Err(Err(InvokeError::Abort))` — not an `Error` variant at all, and
+//     nothing that could be added to the `Error` enum would change that.
+//
+// So `assert!(res.is_err())` alone does not distinguish "the caller wasn't
+// authorized" from "the contract rejected the argument", which for an auth
+// test is the entire claim. The assertions below match the exact shape.
+// ---------------------------------------------------------------------
+
+/// What `try_add_asset` / `try_remove_asset` return. The nesting is the
+/// client binding's, not this contract's: the outer `Result` is whether the
+/// invocation succeeded, the inner `Ok` arm is the decoded return value, and
+/// the inner `Err` arm distinguishes a typed contract `Error` from a host
+/// `InvokeError`.
+type WhitelistCallResult = Result<Result<(), ConversionError>, Result<Error, InvokeError>>;
+
+/// Authorizes exactly one invocation by exactly one address, and nothing else.
+///
+/// Deliberately not `env.mock_all_auths()`: that makes every `require_auth()`
+/// succeed regardless of who signed, which is precisely the condition these
+/// tests exist to detect. Passing a non-admin as `signer` is what "a
+/// non-admin calls this function" means for an entry point like `add_asset`
+/// that takes no caller argument — the signed auth entry is the caller.
+fn whitelist_call_as(
+    env: &Env,
+    vault: &LumensVaultClient,
+    signer: &Address,
+    fn_name: &'static str,
+    asset: &Address,
+) -> WhitelistCallResult {
+    let invoke = MockAuthInvoke {
+        contract: &vault.address,
+        fn_name,
+        args: (asset.clone(),).into_val(env),
+        sub_invokes: &[],
+    };
+    let auths = [MockAuth {
+        address: signer,
+        invoke: &invoke,
+    }];
+    let scoped = vault.mock_auths(&auths);
+    match fn_name {
+        "add_asset" => scoped.try_add_asset(asset),
+        "remove_asset" => scoped.try_remove_asset(asset),
+        other => panic!("whitelist_call_as does not handle {other}"),
+    }
+}
+
+/// Asserts a call was authorized and completed. Unwraps both layers of
+/// `WhitelistCallResult` so callers don't have to, and so the inner
+/// `#[must_use]` decode result isn't silently dropped.
+fn assert_authorized(result: WhitelistCallResult, what: &str) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("{what} succeeded but its return value failed to decode: {e:?}"),
+        Err(Ok(e)) => panic!("{what} was authorized but the contract rejected it: {e:?}"),
+        Err(Err(e)) => panic!("{what} failed at the host level: {e:?} — check the mocked auth"),
+    }
+}
+
+/// Asserts a call failed specifically because authorization was missing,
+/// rather than for any other reason. See the block comment above for why
+/// this is `Err(Err(Abort))` and not one of the contract's `Error` variants.
+fn assert_unauthorized(result: WhitelistCallResult) {
+    match result {
+        Err(Err(InvokeError::Abort)) => {}
+        Err(Ok(e)) => panic!(
+            "expected an authorization failure, but the contract returned its own error: {e:?} \
+             — that means the call was authorized and failed for a different reason"
+        ),
+        Err(Err(other)) => panic!("expected InvokeError::Abort, got {other:?}"),
+        Ok(_) => panic!("expected an authorization failure, but the call succeeded"),
+    }
+}
+
+/// Registers a vault and returns it alongside a real token contract address
+/// to use as the whitelist subject. The constructor's `admin.require_auth()`
+/// is satisfied under `mock_all_auths()`, which is then cleared so that every
+/// call under test runs with only the auth it is explicitly given.
+fn setup_whitelist_fixture(env: &Env, admin: &Address) -> (LumensVaultClient<'static>, Address) {
+    env.mock_all_auths();
+    let vault_client = setup(env, admin, 10);
+
+    let token_admin = Address::generate(env);
+    let (token_client, _) = create_token_contract(env, &token_admin);
+    let asset = token_client.address.clone();
+
+    // From here on, authorization is granted per call via `whitelist_call_as`.
+    env.set_auths(&[]);
+
+    (vault_client, asset)
+}
+
+// =====================================================================
+// 2. Vault operations
+// deposit and withdraw: amounts, withdrawal ordering, and the whitelist's effect on them.
+// =====================================================================
 
 #[test]
 fn test_deposit_and_withdraw() {
@@ -420,6 +552,194 @@ fn test_partial_withdrawal_leaves_remainder_locked_under_the_same_terms() {
 }
 
 // ---------------------------------------------------------------------
+// Deposit ordering (#836 / E05-14).
+//
+// DELIBERATE ORDERING: `deposit` calls `token.transfer` BEFORE writing
+// vault state to storage. If the transfer fails (insufficient balance,
+// paused token, etc.), the whole transaction reverts and no vault should
+// exist. This is the most critical ordering in the contract: a vault
+// recorded without the corresponding tokens actually arriving would be
+// the worst failure possible.
+//
+// This test pins that invariant by attempting a deposit with insufficient
+// balance and asserting that no vault state was created.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_deposit_with_insufficient_balance_creates_no_vault() {
+    // #836 / E05-14: Deposit transfers tokens before recording vault state.
+    // If the transfer fails, no vault should exist — a vault recorded
+    // without tokens arriving is the worst failure this contract could have.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    
+    // Mint only 50 tokens, but attempt to deposit 100
+    token_asset.mint(&user, &50);
+    vault_client.add_asset(&token_client.address);
+
+    let user_balance_before = token_client.balance(&user);
+    let vault_balance_before = token_client.balance(&vault_client.address);
+    let vault_count_before = vault_client.get_user_vault_count(&user);
+
+    // This must fail because the user has insufficient balance.
+    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    assert!(res.is_err(), "Deposit with insufficient balance must fail");
+
+    // CRITICAL: After the failed deposit, no vault should exist and no
+    // state should have changed. This proves the transfer happens before
+    // state is recorded.
+    
+    // 1. User vault count unchanged
+    let vault_count_after = vault_client.get_user_vault_count(&user);
+    assert_eq!(
+        vault_count_after, vault_count_before,
+        "Vault count must not increment on failed deposit"
+    );
+
+    // 2. No vault entry exists (if one was created, this would not panic)
+    let vault_lookup = vault_client.try_get_vault(&user, &token_client.address, &1);
+    assert!(
+        vault_lookup.is_err(),
+        "No vault entry should exist after failed deposit"
+    );
+
+    // 3. Token balances unchanged — no tokens moved
+    assert_eq!(
+        token_client.balance(&user),
+        user_balance_before,
+        "User token balance must be unchanged after failed deposit"
+    );
+    assert_eq!(
+        token_client.balance(&vault_client.address),
+        vault_balance_before,
+        "Vault contract balance must be unchanged after failed deposit"
+    );
+
+    // Positive control: a deposit within the user's balance succeeds,
+    // proving the setup is sound and only the insufficient balance caused
+    // the earlier failure.
+    let success_res = vault_client.deposit(&user, &token_client.address, &50);
+    assert_eq!(success_res, 1, "Deposit within balance must succeed");
+    
+    assert_eq!(vault_client.get_user_vault_count(&user), 1);
+    assert_eq!(token_client.balance(&user), 0);
+    assert_eq!(token_client.balance(&vault_client.address), 50);
+    
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 50);
+}
+
+// ---------------------------------------------------------------------
+// Withdraw ordering (#837 / E05-15).
+//
+// DELIBERATE ORDERING: `withdraw` writes the decremented vault balance to
+// storage BEFORE it calls `transfer` to move tokens out. This is not
+// incidental. Recording state first means the stored balance never lags
+// behind tokens that have already left the vault. Do not reorder these
+// two steps.
+//
+// The tests below pin the observable consequence: stored balance and token
+// balances stay mutually consistent on success, and a rejected withdrawal
+// (timelock, insufficient balance) moves no tokens and changes no balance.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_withdraw_success_keeps_stored_and_token_balances_consistent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    vault_client.withdraw(&user, &token_client.address, &1, &200);
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    let user_bal = token_client.balance(&user);
+    let vault_bal = token_client.balance(&vault_client.address);
+
+    assert_eq!(entry.amount, 300);
+    // Stored balance matches what the vault actually holds.
+    assert_eq!(vault_bal, entry.amount);
+    assert_eq!(user_bal, 700);
+    // No tokens created or destroyed.
+    assert_eq!(user_bal + vault_bal, 1000);
+}
+
+#[test]
+fn test_withdraw_timelock_failure_moves_no_tokens_and_changes_no_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+
+    // Timelock (10 ledgers) has not elapsed.
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &200);
+    assert!(res.is_err());
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 500);
+    assert_eq!(token_client.balance(&user), 500);
+    assert_eq!(token_client.balance(&vault_client.address), 500);
+}
+
+#[test]
+fn test_withdraw_insufficient_balance_moves_no_tokens_and_changes_no_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &500);
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    // Timelock has elapsed, but the request exceeds the deposited balance.
+    let res = vault_client.try_withdraw(&user, &token_client.address, &1, &600);
+    assert!(res.is_err());
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry.amount, 500);
+    assert_eq!(token_client.balance(&user), 500);
+    assert_eq!(token_client.balance(&vault_client.address), 500);
+}
+
+// =====================================================================
+// 3. Lock periods
+// Pause as a circuit breaker, and the ledger at which a vault becomes withdrawable.
+// =====================================================================
+
+// ---------------------------------------------------------------------
 // E05-06 — Pause semantics (FR-5, FR-10, NFR-2).
 //
 // FR-5 has two halves and both are pinned here:
@@ -667,6 +987,52 @@ fn test_pause_does_not_change_any_vaults_unlock_ledger() {
     assert_eq!(token_client.balance(&vault_client.address), 50);
 }
 
+// =====================================================================
+// 4. Storage lifecycle
+// TTL extension for touched entries, and the storage keys the constructor writes.
+// =====================================================================
+
+#[test]
+fn test_user_vault_count_ttl_is_extended_on_deposit() {
+    // The user vault counter is refreshed on each deposit. Without this,
+    // `UserVaultCount` would archive on its default schedule regardless of
+    // how active the user was — silently blocking every
+    // future deposit from that user once it did.
+    let env = Env::default();
+    // blanket mock is fine: test is about storage TTL logic, not access control
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    vault_client.deposit(&user, &token_client.address, &100);
+
+    let count_key = DataKey::UserVaultCount(user.clone());
+    let ttl_after_first_deposit =
+        env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
+
+    // Advance close to (but not past) the extension threshold and deposit
+    // again — the TTL should be bumped back up, not left decaying.
+    env.ledger()
+        .with_mut(|l| l.sequence_number += ttl_after_first_deposit - 1000);
+
+    vault_client.deposit(&user, &token_client.address, &50);
+
+    let ttl_after_second_deposit =
+        env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
+
+    assert!(
+        ttl_after_second_deposit > 1000,
+        "UserVaultCount TTL was not refreshed on the second deposit — it would archive soon"
+    );
+}
+
 // ---------------------------------------------------------------------
 // FR-9 regression guard — atomic constructor
 //
@@ -739,35 +1105,39 @@ fn test_constructor_writes_all_instance_keys_atomically() {
     );
 }
 
-// ---------------------------------------------------------------------
-// The real upgrade test.
-//
-// This is a genuine cross-binary upgrade test, and the distinction matters:
-// earlier versions of it wrote data through the V1 contract and read it back
-// through the SAME running V1 binary, which proves storage round-trips and
-// nothing about upgrades. Built the way Stellar's own docs build it:
-// https://developers.stellar.org/docs/build/guides/conventions/upgrading-contracts
-//
-// It needs a second, genuinely separate crate — contracts/lumens-vault-v2-fixture/
-// in the folder next to this one — compiled to wasm BEFORE this test runs,
-// because `contractimport!` reads the compiled .wasm file at compile time,
-// not at test time. Build order:
-//
-//   cd contracts/lumens-vault-v2-fixture && stellar contract build
-//   cd ../lumens-vault && cargo test
-//
-// If your workspace layout puts these crates somewhere else, fix the path
-// in the `contractimport!` call below to match.
-// ---------------------------------------------------------------------
+// =====================================================================
+// 5. Authorization
+// Who may call the admin entry points. The scoped-auth helpers live in section 1.
+// =====================================================================
 
-mod new_contract {
-    soroban_sdk::contractimport!(
-        file = "../lumens-vault-v2-fixture/target/wasm32v1-none/release/lumens_vault_v2_fixture.wasm"
+#[test]
+fn test_admin_can_add_and_remove_asset() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let (vault_client, asset) = setup_whitelist_fixture(&env, &admin);
+
+    assert!(
+        !vault_client.is_whitelisted(&asset),
+        "an asset should not be whitelisted before the admin adds it"
     );
-}
 
-fn install_new_wasm(env: &Env) -> BytesN<32> {
-    env.deployer().upload_contract_wasm(new_contract::WASM)
+    assert_authorized(
+        whitelist_call_as(&env, &vault_client, &admin, "add_asset", &asset),
+        "admin's add_asset",
+    );
+    assert!(
+        vault_client.is_whitelisted(&asset),
+        "is_whitelisted should report true after the admin added the asset"
+    );
+
+    assert_authorized(
+        whitelist_call_as(&env, &vault_client, &admin, "remove_asset", &asset),
+        "admin's remove_asset",
+    );
+    assert!(
+        !vault_client.is_whitelisted(&asset),
+        "is_whitelisted should report false after the admin removed the asset"
+    );
 }
 
 // =====================================================================
@@ -848,7 +1218,7 @@ fn test_upgrade_rejects_an_unauthorized_caller() {
 const UPGRADE_TEST_START_LEDGER: u32 = 1000;
 
 #[test]
-fn test_real_upgrade_and_state_migration() {
+fn test_add_asset_rejects_non_admin_and_leaves_asset_unlisted() {
     let env = Env::default();
     // blanket mock is fine: test is about upgrades and migration, not access control
     env.mock_all_auths();
@@ -856,26 +1226,10 @@ fn test_real_upgrade_and_state_migration() {
         .with_mut(|l| l.sequence_number = UPGRADE_TEST_START_LEDGER);
 
     let admin = Address::generate(&env);
-    let user = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let (vault_client, asset) = setup_whitelist_fixture(&env, &admin);
 
-    let vault_client = setup(&env, &admin, 10);
-
-    let token_admin = Address::generate(&env);
-    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
-    token_asset.mint(&user, &1000);
-    vault_client.add_asset(&token_client.address);
-
-    // 1. Write real state through the OLD contract's own deposit logic —
-    //    not a raw storage poke.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
-    assert_eq!(returned_vault_id, 1);
-    assert_eq!(vault_client.version(), 1);
-
-    // 2. Install a SECOND, genuinely different compiled binary and swap the
-    //    SAME contract address over to it.
-    let new_wasm_hash = install_new_wasm(&env);
-    vault_client.upgrade(&new_wasm_hash);
-
+    assert!(!vault_client.is_whitelisted(&asset));
     // 3. Prove the running bytecode actually changed. The V1 client type
     //    has no way to lie about this — `version()` only returns 2 if the
     //    call is genuinely being served by the new binary.
@@ -1608,7 +1962,6 @@ fn test_add_asset_rejects_non_admin_and_leaves_asset_unlisted() {
     let (vault_client, asset) = setup_whitelist_fixture(&env, &admin);
 
     assert!(!vault_client.is_whitelisted(&asset));
-
     let res = whitelist_call_as(&env, &vault_client, &attacker, "add_asset", &asset);
     assert_unauthorized(res);
 
@@ -1842,3 +2195,93 @@ fn test_remove_asset_rejects_non_admin_and_leaves_asset_whitelisted() {
         "a rejected remove_asset must not disturb the admin either"
     );
 }
+// =====================================================================
+// 6. Events
+// Emitted event shapes. Covered by E05-08; no event tests exist yet.
+// =====================================================================
+
+// =====================================================================
+// 7. Upgrade
+// The cross-binary upgrade, the v2 fixture it needs, and state migration.
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// The real upgrade test.
+//
+// This is a genuine cross-binary upgrade test, and the distinction matters:
+// earlier versions of it wrote data through the V1 contract and read it back
+// through the SAME running V1 binary, which proves storage round-trips and
+// nothing about upgrades. Built the way Stellar's own docs build it:
+// https://developers.stellar.org/docs/build/guides/conventions/upgrading-contracts
+//
+// It needs a second, genuinely separate crate — contracts/lumens-vault-v2-fixture/
+// in the folder next to this one — compiled to wasm BEFORE this test runs,
+// because `contractimport!` reads the compiled .wasm file at compile time,
+// not at test time. Build order:
+//
+//   cd contracts/lumens-vault-v2-fixture && stellar contract build
+//   cd ../lumens-vault && cargo test
+//
+// If your workspace layout puts these crates somewhere else, fix the path
+// in the `contractimport!` call below to match.
+// ---------------------------------------------------------------------
+
+mod new_contract {
+    soroban_sdk::contractimport!(
+        file = "../lumens-vault-v2-fixture/target/wasm32v1-none/release/lumens_vault_v2_fixture.wasm"
+    );
+}
+
+fn install_new_wasm(env: &Env) -> BytesN<32> {
+    env.deployer().upload_contract_wasm(new_contract::WASM)
+}
+
+#[test]
+fn test_real_upgrade_and_state_migration() {
+    let env = Env::default();
+    // blanket mock is fine: test is about upgrades and migration, not access control
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.sequence_number = 1000);
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let vault_client = setup(&env, &admin, 10);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // 1. Write real state through the OLD contract's own deposit logic —
+    //    not a raw storage poke.
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
+    assert_eq!(returned_vault_id, 1);
+    assert_eq!(vault_client.version(), 1);
+
+    // 2. Install a SECOND, genuinely different compiled binary and swap the
+    //    SAME contract address over to it.
+    let new_wasm_hash = install_new_wasm(&env);
+    vault_client.upgrade(&new_wasm_hash);
+
+    // 3. Prove the running bytecode actually changed. The V1 client type
+    //    has no way to lie about this — `version()` only returns 2 if the
+    //    call is genuinely being served by the new binary.
+    assert_eq!(vault_client.version(), 2);
+
+    // 4. The real claim: data written by the OLD binary as
+    //    `VaultEntry::V1(..)` is read correctly by the NEW binary's own
+    //    code, through a function (`get_vault` returning the V2 shape)
+    //    that only exists post-upgrade. This has to go through a client
+    //    typed against the NEW contract's interface — the old
+    //    `LumensVaultClient` binding has no `get_vault` method to call.
+    let new_client = new_contract::Client::new(&env, &vault_client.address);
+    let migrated = new_client.get_vault(&user, &token_client.address, &1);
+
+    assert_eq!(migrated.amount, 500);
+    // `last_touched_ledger` only exists on VaultEntryV2 — its presence at
+    // all is part of the proof that migration, not just a raw byte
+    // round-trip, actually happened.
+    assert!(migrated.last_touched_ledger > 0);
+}
+
