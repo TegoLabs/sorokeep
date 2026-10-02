@@ -60,3 +60,34 @@ jobs:
       run: node scripts/bundle-size.mjs
       env:
         BUNDLE_SIZE_THRESHOLD: '10'
+
+  contract-wasm-build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v7
+
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32v1-none
+
+    - name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Stellar CLI
+      run: cargo install --locked stellar-cli --features opt
+
+    - name: Build Contract to wasm
+      run: stellar contract build
+
+    - name: Run Contract Tests
+      run: cargo test
