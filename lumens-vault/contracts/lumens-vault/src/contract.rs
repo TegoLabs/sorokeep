@@ -31,8 +31,9 @@ pub enum Error {
     TimelockNotExpired = 5,
     VaultNotFound = 6,
     InvalidAmount = 7,
-    InvalidLockPeriod = 8,
-    InvalidLockBounds = 9,
+    VaultIdOverflow = 8,
+    InvalidLockPeriod = 9,
+    InvalidLockBounds = 10,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280; // 86,400s / 5s-per-ledger
@@ -74,8 +75,9 @@ impl LumensVault {
         admin.require_auth();
 
         // A zero minimum or inverted range would make the vault unusable until
-        // an upgrade. Reject it before any instance storage is written.
-        if min_lock_ledgers == 0 || max_lock_ledgers < min_lock_ledgers {
+        // an upgrade. Share update_config's validation and reject it before
+        // any instance storage is written.
+        if Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers).is_err() {
             panic_with_error!(&env, Error::InvalidLockBounds);
         }
 
@@ -246,7 +248,9 @@ impl LumensVault {
             .persistent()
             .get(&vault_count_key)
             .unwrap_or(0);
-        let new_vault_id = current_count + 1;
+        let new_vault_id = current_count
+            .checked_add(1)
+            .ok_or(Error::VaultIdOverflow)?;
         env.storage()
             .persistent()
             .set(&vault_count_key, &new_vault_id);

@@ -98,7 +98,7 @@ cd ..\lumens-vault
 cargo test
 ```
 
-That is the whole path. Expected result: `5 passed; 0 failed`.
+That is the whole path. Expected result: `18 passed; 0 failed`.
 
 ### Verified output, step 1 — fixture build
 
@@ -138,8 +138,10 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-A different test count than `5` means you are not on the current branch, or a test is
-being filtered out — check before trusting a green run.
+A test count other than the current `18` means you are not on the current branch, or a
+test is being filtered out — check before trusting a green run. The `5 passed` block above
+is verbatim output from the older checkout this page was first written against and is left
+as recorded history; the count has since grown as tests were added.
 
 ## Why the fixture comes first
 
@@ -191,6 +193,57 @@ source, the build *succeeds* — against the old wasm. The suite goes green whil
 code you are looking at. Re-run `stellar contract build` in the fixture after every
 change to `contracts/lumens-vault-v2-fixture/`, before `cargo test`. An automated guard
 for both failure modes is tracked separately as E05-03.
+
+## Repeat-run verification
+
+A single green run is weak evidence for a suite that touches the ledger and TTL. The
+contract suite was run repeatedly to check for nondeterminism, with no code change
+between runs.
+
+| Field | Value |
+| ----- | ----- |
+| Date | 2026-10-01 |
+| Commit | `ec6bf6c2725f01c9de184d627c8010260832a750` |
+| Command | `cargo test` in `contracts/lumens-vault` |
+| Runs | 25 consecutive |
+| Pass rate | 25/25 (100%) |
+| Test count per run | 18 passed, 0 failed, 0 ignored |
+| Plus | 1 single-threaded run (`cargo test -- --test-threads=1`), passed |
+| No failures filed | none — nothing flaked, so no follow-up issue was opened |
+
+Environment: Linux x86_64, `rustc`/`cargo` 1.91.0, `wasm32v1-none` target installed.
+
+The exact command, run 25 times in a loop with no code change in between:
+
+```bash
+cd lumens-vault/contracts/lumens-vault
+for i in $(seq 1 25); do
+  cargo test 2>&1 | grep -E '^test result:' && echo "run $i: PASS" || echo "run $i: FAIL"
+done
+```
+
+Every run reported the same result line:
+
+```text
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Run durations ranged from 1.51s to 3.18s. The single-threaded run took 6.52s, which is
+what serialising the 18 tests costs — no test depends on another having run first.
+
+**This is evidence about the tests, not a fix.** Per E05-21's non-goals, no flake was
+found here and none was fixed. `test_real_upgrade_and_state_migration` — the test
+ADR 0008 could not reproduce a failure in — passed on all 25 runs plus the
+single-threaded run.
+
+Two caveats on what this result does and does not establish:
+
+- It does not address the **build-state** hazard in ADR 0008. `contractimport!` reads
+  the fixture wasm at compile time, and the runs above used a fixture that was already
+  built. A stale or missing fixture is still a deterministic failure mode that a green
+  `cargo test` does not rule out. E05-03 covers making that dependency explicit.
+- The **ledger pin** at `src/test.rs` is load-bearing per ADR 0008 Experiment C, not a
+  flake suppression. It was left in place, untouched.
 
 ## Troubleshooting
 

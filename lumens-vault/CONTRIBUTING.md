@@ -76,6 +76,28 @@ failure output if you skip the fixture build — is in
 5. If you had to make a judgment call the issue didn't specify, say so
    explicitly in the PR description rather than picking silently.
 
+### Use this directory's PR template
+
+There is a PR template that turns the two rules above into things you have to
+fill in: [`.github/PULL_REQUEST_TEMPLATE/lumens-vault.md`](../.github/PULL_REQUEST_TEMPLATE/lumens-vault.md).
+It prompts for the issue you're closing, every file in the diff and why, and
+the real output backing each acceptance criterion — plus checkboxes that
+nothing outside `lumens-vault/` was touched and that no key, webhook secret or
+token leaked into the diff.
+
+**GitHub will not apply it for you.** The repository's default template is for
+sorokeep's own TypeScript code, and GitHub only auto-applies that one. To get
+this template instead, either:
+
+- append `?template=lumens-vault.md` to the compare URL when you open the PR —
+  e.g. `https://github.com/TegoLabs/sorokeep/compare/main...your-branch?template=lumens-vault.md`
+  (if you already have a PR open, `&template=lumens-vault.md` works on the
+  existing compare page), or
+- open the PR normally and paste the file's contents over the default body.
+
+Either way, filling it in is not optional for work in this directory. It asks
+only for things a reviewer would otherwise have to ask you for one at a time.
+
 ## Review and merge
 
 PRs are reviewed against the issue's acceptance criteria first, scope

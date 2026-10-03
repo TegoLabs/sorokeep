@@ -54,22 +54,30 @@ rustup target add wasm32v1-none
 
 ## Build and test
 
-The upgrade test imports the v2 fixture's compiled wasm via `contractimport!`, which resolves
-at **compile** time. The fixture must therefore be built before the main crate's tests, or
-cargo test` fails on a missing file:
+Use the test script, which handles the fixture build order automatically:
 
 ```powershell
-cd contracts\lumens-vault-v2-fixture
+./scripts/test-contract.ps1
+```
+
+Expected: 18 tests, all passing.
+
+**Why a script?** The upgrade test imports the v2 fixture's compiled wasm via `contractimport!`,
+which resolves at **compile** time. The fixture must be built first, or the build fails with
+a clear error message pointing you to either run the fixture build manually or use this script.
+
+To build the fixture and run tests manually:
+
+```powershell
+cd contracts/lumens-vault-v2-fixture
 stellar contract build
 
-cd ..\lumens-vault
+cd ../lumens-vault
 cargo test
 ```
 
-Expected: 5 tests, all passing.
-
 The full walkthrough — required toolchain versions, this command sequence with its
-actual output, what the fixture-ordering failure looks like when you skip step 1, and a
+actual output, what the fixture-ordering failure looks like, and a
 troubleshooting table — is in [`docs/testing.md`](docs/testing.md).
 
 To build the contract itself to wasm:
