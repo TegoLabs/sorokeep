@@ -28,10 +28,26 @@ pub enum VaultConfig {
     V1(VaultConfigV1),
 }
 
+// Global, inclusive-at-both-ends lock bounds. There is deliberately no
+// `default_timelock_ledgers` any more: a default is a second source of truth
+// that the frontend's picker would have to know about, and the whole point of
+// bounds is that every deposit states its own period inside them.
+//
+// `//` and not `///` on purpose: this struct is part of the wasm's spec
+// metadata, which is paid for in rent forever. The same warning appears
+// above `__constructor` in contract.rs.
+//
+// Edited in place as V1 rather than added as a V2 variant, which is only
+// safe while nothing anywhere holds an instance of this contract in the old
+// shape. That confirmation has not been recorded in this repository yet
+// (E02-01), so treat it as an open precondition rather than a settled fact:
+// if the contract turns out to have been deployed, this has to become
+// `VaultConfig::V2` and existing instances need a migration.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfigV1 {
-    pub default_timelock_ledgers: u32,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
 }
 
 #[contracttype]

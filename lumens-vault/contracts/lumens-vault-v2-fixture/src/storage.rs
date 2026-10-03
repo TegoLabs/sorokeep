@@ -22,12 +22,16 @@ pub enum VaultConfig {
     V1(VaultConfigV1),
 }
 
+// Mirrors the real contract's `VaultConfigV1` byte-for-byte. The fixture
+// never reads `DataKey::Config` — only `get_vault` and `version` exist here —
+// so this shape is carried purely to keep the "V1 shapes are byte-identical
+// across both crates" invariant above true, rather than because anything
+// depends on it.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfigV1 {
-    // The fixture never reads DataKey::Config; this shape is retained solely
-    // for byte-parity with the real contract's storage types.
-    pub default_timelock_ledgers: u32,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
 }
 
 /// The deliberate schema change this whole fixture exists to test: a new
