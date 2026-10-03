@@ -1,10 +1,9 @@
 import chalk from "chalk";
 import { StrKey } from "@stellar/stellar-sdk";
-
-const AVG_LEDGER_CLOSE_TIME_IN_SECONDS = 5.5;
+import { AVG_LEDGER_CLOSE_SECONDS } from "./ledger.js";
 
 export function convertLedgerCloseTimeToSeconds(ledgerCloseTime: number): number {
-    return ledgerCloseTime * AVG_LEDGER_CLOSE_TIME_IN_SECONDS;
+    return ledgerCloseTime * AVG_LEDGER_CLOSE_SECONDS;
 }
 
 export function printOutput(data: unknown, jsonFlag = false): void {
