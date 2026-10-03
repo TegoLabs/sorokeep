@@ -1,4 +1,6 @@
-use soroban_sdk::{contract, contracterror, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, panic_with_error, token, Address, BytesN, Env,
+};
 
 use crate::events::*;
 use crate::storage::{
@@ -29,8 +31,9 @@ pub enum Error {
     TimelockNotExpired = 5,
     VaultNotFound = 6,
     InvalidAmount = 7,
-VaultIdOverflow = 8,
+    VaultIdOverflow = 8,
     InvalidLockPeriod = 9,
+    InvalidLockBounds = 10,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280; // 86,400s / 5s-per-ledger
@@ -68,20 +71,21 @@ impl LumensVault {
     // Note: `///` doc comments on contract functions are embedded in the wasm's
     // spec metadata and are paid for in rent forever. Keep them to one line and
     // put the reasoning in `//` comments like this one.
-    pub fn __constructor(env: Env, admin: Address, default_timelock_ledgers: u32) {
+    pub fn __constructor(env: Env, admin: Address, min_lock_ledgers: u32, max_lock_ledgers: u32) {
         admin.require_auth();
+
+        // A zero minimum or inverted range would make the vault unusable until
+        // an upgrade. Share update_config's validation and reject it before
+        // any instance storage is written.
+        if Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers).is_err() {
+            panic_with_error!(&env, Error::InvalidLockBounds);
+        }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
 
-        // Validate the initial bounds with the same helper `update_config`
-        // uses, so the constructor and the admin path can never drift apart.
-        // A zero minimum or an inverted range is rejected here with the same
-        // error a later `update_config` call would return.
-        Self::validate_lock_bounds(default_timelock_ledgers, default_timelock_ledgers)
-            .expect("invalid default timelock");
-
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
