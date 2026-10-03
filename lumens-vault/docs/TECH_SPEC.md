@@ -29,7 +29,7 @@ good.
 ### 2.1 Vault Core
 
 - **FR-1 (DECIDED).** Users may deposit any admin-whitelisted asset.
-- **FR-2 (DECIDED, in progress).** Users select a lock period per deposit,
+- **FR-2 (DECIDED).** Users select a lock period per deposit,
   within admin-configured `[min_lock_ledgers, max_lock_ledgers]` bounds.
   This restores the original design after it was lost during an earlier
   implementation pass; see epic E02 in the issue backlog.
