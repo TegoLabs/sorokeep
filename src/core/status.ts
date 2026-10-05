@@ -7,6 +7,7 @@ import {
     type TTLStatus,
 } from "../utils/formatting.js";
 import { computeDecayRate, projectCrossingLedger } from "./predictive.js";
+import { ledgersToMilliseconds } from "../utils/ledger.js";
 
 export type EntryTTLStatus = TTLStatus | "unknown";
 
@@ -86,8 +87,10 @@ function mapEntryStatus(
         );
 
         if (projectedCrossingLedger !== null) {
-            const SECONDS_PER_LEDGER = 5;
-            const deltaMs = (projectedCrossingLedger - lastCheckedLedger) * SECONDS_PER_LEDGER * 1000;
+            // Must use the same basis as `approximateTimeRemaining` below, which
+            // goes through formatTimeToCloseLedger. These two fields describe the
+            // same moment and previously disagreed by 10%.
+            const deltaMs = ledgersToMilliseconds(projectedCrossingLedger - lastCheckedLedger);
             projectedCrossingAt = new Date(Date.now() + deltaMs).toISOString();
         }
     }

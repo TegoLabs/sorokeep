@@ -44,7 +44,10 @@
   ],
   "author": "Abdulmalik Alayande",
   "overrides": {
-    "glob": "11.1.0"
+    "glob": "11.1.0",
+    "axios": "1.20.0",
+    "fast-uri": "3.1.8",
+    "ip-address": "10.7.2"
   },
   "license": "MIT",
   "type": "module",

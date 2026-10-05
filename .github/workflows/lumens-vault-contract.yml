@@ -1,0 +1,80 @@
+name: Lumens Vault Contract CI
+
+# Lives at the repo root because GitHub only reads .github/workflows/ there.
+# The path filters keep it off sorokeep's own changes. `push` is left
+# unfiltered by branch so pushes to contributor forks keep verifying the
+# workflow — upstream does not execute workflows for pull requests from
+# forks.
+#
+# Build order matters: the upgrade test imports the v2 fixture's compiled
+# wasm via `contractimport!`, which resolves at *compile* time, so the
+# fixture must be built before `cargo test` runs or the test build fails
+# on a missing file. The fixture is built with `stellar contract build`,
+# not plain cargo: on wasm targets soroban-sdk's build script refuses to
+# run unless the build system set
+# SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2, which stellar-cli
+# does (spec shaking is part of producing a correct contract spec).
+
+on:
+  push:
+    paths:
+      - 'lumens-vault/contracts/**'
+      - '.github/workflows/lumens-vault-contract.yml'
+  pull_request:
+    paths:
+      - 'lumens-vault/contracts/**'
+      - '.github/workflows/lumens-vault-contract.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-test:
+    name: cargo test (lumens-vault)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lumens-vault/contracts/lumens-vault
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        # The locked soroban-sdk 28.0.0 declares rust-version = 1.91.0 and
+        # refuses older toolchains; 1.91.0 itself is blacklisted by
+        # stellar-cli's contract build (a known-bad rustc), so use 1.92.0.
+        # wasm32v1-none is the only target the Soroban runtime supports.
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: 1.92.0
+          target: wasm32v1-none
+          cache-workspaces: |
+            lumens-vault/contracts/lumens-vault
+            lumens-vault/contracts/lumens-vault-v2-fixture
+
+      - name: Install stellar-cli (pinned v28.0.0)
+        # Matches the major of soroban-sdk 28 and is the version named as
+        # available in the project docs. The release tarball contains a
+        # single `stellar` binary at its root.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL \
+            https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C "$HOME/.local/bin"
+          chmod 0755 "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          stellar --version
+
+      - name: Build v2 fixture wasm (required by contractimport!)
+        run: stellar contract build
+        working-directory: lumens-vault/contracts/lumens-vault-v2-fixture
+
+      - name: Run tests
+        run: cargo test --locked

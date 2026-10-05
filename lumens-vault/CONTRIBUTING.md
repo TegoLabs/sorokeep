@@ -6,7 +6,7 @@ project already made once and doesn't want to make again.
 
 ## Where work comes from
 
-All work is tracked as GitHub issues in the `sorokeep` repository, labeled
+All work is tracked as GitHub issues in the [`sorokeep` repository](https://github.com/TegoLabs/sorokeep/issues?q=is%3Aissue+label%3Alumens-vault), labeled
 `lumens-vault`, grouped into milestones. **Every issue has an Acceptance
 Criteria checklist and a Non-Goals section.** Both are load-bearing:
 
@@ -53,11 +53,14 @@ You'll need:
 - The `wasm32v1-none` target
 - `stellar-cli`, reasonably current
 - Node.js, for anything under the eventual app-data/frontend components
-  (see `SYSTEM_DESIGN.md` — these don't fully exist yet)
+  (see [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) — these don't fully exist yet)
 
 Build and test commands are in [`README.md`](README.md). Note the build order: the
 v2 fixture crate must be compiled before `cargo test`, because the upgrade test
-resolves its wasm at compile time.
+resolves its wasm at compile time. The verified step-by-step — toolchain versions,
+the exact PowerShell sequence from clean checkout to green suite, and the actual
+failure output if you skip the fixture build — is in
+[`docs/testing.md`](docs/testing.md).
 
 ## Making a PR
 
@@ -73,6 +76,28 @@ resolves its wasm at compile time.
 5. If you had to make a judgment call the issue didn't specify, say so
    explicitly in the PR description rather than picking silently.
 
+### Use this directory's PR template
+
+There is a PR template that turns the two rules above into things you have to
+fill in: [`.github/PULL_REQUEST_TEMPLATE/lumens-vault.md`](../.github/PULL_REQUEST_TEMPLATE/lumens-vault.md).
+It prompts for the issue you're closing, every file in the diff and why, and
+the real output backing each acceptance criterion — plus checkboxes that
+nothing outside `lumens-vault/` was touched and that no key, webhook secret or
+token leaked into the diff.
+
+**GitHub will not apply it for you.** The repository's default template is for
+sorokeep's own TypeScript code, and GitHub only auto-applies that one. To get
+this template instead, either:
+
+- append `?template=lumens-vault.md` to the compare URL when you open the PR —
+  e.g. `https://github.com/TegoLabs/sorokeep/compare/main...your-branch?template=lumens-vault.md`
+  (if you already have a PR open, `&template=lumens-vault.md` works on the
+  existing compare page), or
+- open the PR normally and paste the file's contents over the default body.
+
+Either way, filling it in is not optional for work in this directory. It asks
+only for things a reviewer would otherwise have to ask you for one at a time.
+
 ## Review and merge
 
 PRs are reviewed against the issue's acceptance criteria first, scope
@@ -82,7 +107,7 @@ than the issue asked.
 
 ## Code of conduct and security
 
-This repo's `CODE_OF_CONDUCT.md` applies here too. For security issues,
-follow `SECURITY.md`'s disclosure process — do not open a public issue for
+This repo's [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) applies here too. For security issues,
+follow [`SECURITY.md`](../SECURITY.md)'s disclosure process — do not open a public issue for
 a suspected vulnerability, especially anything touching the contract's
 fund-safety logic.
