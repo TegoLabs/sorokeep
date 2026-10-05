@@ -23,6 +23,7 @@ import { computeDecayRate, projectCrossingLedger } from "./predictive.js";
 import { getLogger } from "../logging/index.js";
 import { getTracer, endSpan } from "../observability/tracing.js";
 import type { Span } from "@opentelemetry/api";
+import { ledgersToMilliseconds } from "../utils/ledger.js";
 
 const logger = getLogger().child({ component: "MonitorCycle" });
 
@@ -359,11 +360,7 @@ async function processContract(
 
 /**
  * Approximate a wall-clock ISO-8601 timestamp for a future ledger.
- * Stellar closes a ledger roughly every 5 seconds.
  */
 function approximateLedgerTimestamp(targetLedger: number, currentLedger: number): string {
-    const SECONDS_PER_LEDGER = 5;
-    const deltaLedgers = targetLedger - currentLedger;
-    const deltaMs = deltaLedgers * SECONDS_PER_LEDGER * 1000;
-    return new Date(Date.now() + deltaMs).toISOString();
+    return new Date(Date.now() + ledgersToMilliseconds(targetLedger - currentLedger)).toISOString();
 }

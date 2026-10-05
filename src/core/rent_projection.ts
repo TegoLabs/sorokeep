@@ -28,11 +28,11 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Average Stellar ledger close time in seconds. */
-export const AVG_LEDGER_CLOSE_SECONDS = 5.5;
-
-/** Approximate number of ledgers per day (86400s ÷ 5.5s/ledger). */
-export const LEDGERS_PER_DAY = 86400 / AVG_LEDGER_CLOSE_SECONDS;
+// Imported for local use and re-exported so existing importers keep working;
+// the canonical definition lives in utils/ledger.ts because four modules
+// needed it and had drifted to two different values.
+import { AVG_LEDGER_CLOSE_SECONDS, LEDGERS_PER_DAY } from "../utils/ledger.js";
+export { AVG_LEDGER_CLOSE_SECONDS, LEDGERS_PER_DAY };
 
 /** One XLM = 10,000,000 stroops. */
 export const STROOPS_PER_XLM = 10_000_000;
