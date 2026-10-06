@@ -1298,6 +1298,91 @@ fn test_deposit_with_insufficient_balance_creates_no_vault() {
 }
 
 // ---------------------------------------------------------------------
+// E05-04: lock-period boundaries.
+//
+// The configured range [min_lock_ledgers, max_lock_ledgers] is inclusive at
+// both ends. Each test uses a value exactly on, or exactly one outside, a
+// boundary — a mid-range value would pass whether the comparison is `<` or
+// `<=`, so it proves nothing about the edges.
+// ---------------------------------------------------------------------
+
+const BOUNDARY_MIN_LOCK: u32 = 10;
+const BOUNDARY_MAX_LOCK: u32 = 100;
+const BOUNDARY_START_LEDGER: u32 = 1000;
+
+/// Registers a vault with an explicit lock range and a pinned ledger
+/// sequence, so `unlock_ledger` is deterministic. Returns the vault client,
+/// the token client and a funded depositor.
+fn setup_boundary_vault(env: &Env) -> (LumensVaultClient<'static>, TokenClient<'static>, Address) {
+    env.mock_all_auths();
+    env.ledger()
+        .with_mut(|l| l.sequence_number = BOUNDARY_START_LEDGER);
+
+    let admin = Address::generate(env);
+    let user = Address::generate(env);
+
+    let vault_id = env.register(LumensVault, (&admin, BOUNDARY_MIN_LOCK, BOUNDARY_MAX_LOCK));
+    let vault_client = LumensVaultClient::new(env, &vault_id);
+
+    let token_admin = Address::generate(env);
+    let (token_client, token_asset) = create_token_contract(env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    (vault_client, token_client, user)
+}
+
+#[test]
+fn test_deposit_at_min_lock_ledgers_succeeds() {
+    let env = Env::default();
+    let (vault_client, token_client, user) = setup_boundary_vault(&env);
+
+    let vault_id = vault_client.deposit(&user, &token_client.address, &100, &BOUNDARY_MIN_LOCK);
+    assert_eq!(vault_id, 1);
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &vault_id);
+    assert_eq!(entry.unlock_ledger, BOUNDARY_START_LEDGER + BOUNDARY_MIN_LOCK);
+}
+
+#[test]
+fn test_deposit_at_max_lock_ledgers_succeeds() {
+    let env = Env::default();
+    let (vault_client, token_client, user) = setup_boundary_vault(&env);
+
+    let vault_id = vault_client.deposit(&user, &token_client.address, &100, &BOUNDARY_MAX_LOCK);
+    assert_eq!(vault_id, 1);
+
+    let entry = vault_client.get_vault(&user, &token_client.address, &vault_id);
+    assert_eq!(entry.unlock_ledger, BOUNDARY_START_LEDGER + BOUNDARY_MAX_LOCK);
+}
+
+#[test]
+fn test_deposit_one_below_min_lock_ledgers_fails() {
+    let env = Env::default();
+    let (vault_client, token_client, user) = setup_boundary_vault(&env);
+
+    let res = vault_client.try_deposit(
+        &user,
+        &token_client.address,
+        &100,
+        &(BOUNDARY_MIN_LOCK - 1),
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+}
+
+#[test]
+fn test_deposit_one_above_max_lock_ledgers_fails() {
+    let env = Env::default();
+    let (vault_client, token_client, user) = setup_boundary_vault(&env);
+
+    let res = vault_client.try_deposit(
+        &user,
+        &token_client.address,
+        &100,
+        &(BOUNDARY_MAX_LOCK + 1),
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+}
 // Withdraw ordering (#837 / E05-15).
 //
 // DELIBERATE ORDERING: `withdraw` writes the decremented vault balance to
