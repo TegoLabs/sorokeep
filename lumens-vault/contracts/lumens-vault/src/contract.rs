@@ -428,8 +428,8 @@ impl LumensVault {
     pub fn get_lock_bounds(env: Env) -> Result<(u32, u32), Error> {
         let config = Self::get_config(&env)?;
         Ok((
-            config.min_timelock_ledgers,
-            config.max_timelock_ledgers,
+            config.min_lock_ledgers,
+            config.max_lock_ledgers,
         ))
     }
 
