@@ -78,3 +78,14 @@ pub struct UpgradeEvent {
     pub admin: Address,
     pub new_wasm_hash: BytesN<32>,
 }
+
+/// Published by update_config after a successful bounds write. The admin is
+/// the only #[topic]; the bounds are data fields, which keeps the topic count
+/// at two regardless of how the SDK's default topic naming resolves.
+#[contractevent]
+pub struct ConfigUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
+}

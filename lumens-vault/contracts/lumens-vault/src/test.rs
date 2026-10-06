@@ -34,11 +34,16 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
 }
 
 /// `env.register` passes constructor arguments directly to `__constructor`.
-/// Builds a vault whose min and max lock bounds are both `lock_ledgers`, so
-/// the only period a deposit can legally pass is that same value. Tests that
-/// care about the range use `setup_boundary_vault` instead.
-fn setup(env: &Env, admin: &Address, lock_ledgers: u32) -> LumensVaultClient<'static> {
-    let vault_id = env.register(LumensVault, (admin, lock_ledgers, lock_ledgers));
+/// Registers a vault with the given lock bounds. Callers that pass the same
+/// value twice get a vault where the only legal deposit period is that value,
+/// which is what most tests want.
+fn setup(
+    env: &Env,
+    admin: &Address,
+    min_lock_ledgers: u32,
+    max_lock_ledgers: u32,
+) -> LumensVaultClient<'static> {
+    let vault_id = env.register(LumensVault, (admin, min_lock_ledgers, max_lock_ledgers));
     LumensVaultClient::new(env, &vault_id)
 }
 
@@ -51,7 +56,7 @@ fn test_deposit_and_withdraw() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -90,7 +95,7 @@ fn test_deposit_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -115,7 +120,7 @@ fn test_withdraw_rejects_non_positive_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -151,7 +156,7 @@ fn test_withdraw_extends_ttl_of_only_the_entries_it_touches() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -215,7 +220,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -274,7 +279,7 @@ fn test_multi_asset_vault_ids_are_per_user() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -300,7 +305,7 @@ fn test_withdraw_rejects_insufficient_balance() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -334,7 +339,7 @@ fn test_withdraw_timelock_boundary_is_inclusive() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
     // lock period of 10 ledgers.
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -366,7 +371,7 @@ fn test_get_vault_rejects_nonexistent_vault() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, _token_asset) = create_token_contract(&env, &token_admin);
@@ -385,7 +390,7 @@ fn test_withdraw_rejects_nonexistent_vault() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, _token_asset) = create_token_contract(&env, &token_admin);
@@ -408,7 +413,7 @@ fn test_withdraw_rejects_zero_amount() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -426,7 +431,7 @@ fn test_withdraw_rejects_zero_amount() {
     assert_eq!(entry.amount, 500);
 
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     // Two distinct tokens — same admin for brevity, independent contracts.
     let token_admin = Address::generate(&env);
@@ -497,7 +502,7 @@ fn test_deposit_extends_ttl_of_only_the_entries_it_touches() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -570,7 +575,7 @@ fn test_delisting_blocks_deposits_but_never_traps_existing_funds() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -612,7 +617,7 @@ fn test_partial_withdrawal_leaves_remainder_locked_under_the_same_terms() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -681,7 +686,7 @@ fn test_deposit_fails_while_paused() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -708,7 +713,7 @@ fn test_withdraw_of_matured_vault_fails_while_paused() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -762,7 +767,7 @@ fn test_withdraw_is_allowed_at_exactly_unlock_ledger_and_rejected_one_ledger_bef
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -800,7 +805,7 @@ fn test_deposit_and_withdraw_succeed_after_unpause() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -838,7 +843,7 @@ fn test_pause_does_not_change_any_vaults_unlock_ledger() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -931,7 +936,7 @@ fn test_constructor_writes_all_instance_keys_atomically() {
 
     // Register the contract with constructor args. No other call has been made
     // yet — in particular, no deposit exists. This is the state we are testing.
-    let vault_client = setup(&env, &admin, timelock_ledgers);
+    let vault_client = setup(&env, &admin, timelock_ledgers, timelock_ledgers);
 
     // 1. Admin key: get_admin_address must return the exact address passed to
     //    the constructor, with no separate initializer call required.
@@ -1096,7 +1101,7 @@ fn test_real_upgrade_and_state_migration() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
 
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1176,7 +1181,7 @@ fn test_deposit_and_withdraw_at_i128_extremes_do_not_corrupt_balances() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (asset_1_client, asset_1) = create_token_contract(&env, &token_admin);
@@ -1239,7 +1244,7 @@ fn test_deposit_with_insufficient_balance_creates_no_vault() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1422,7 +1427,7 @@ fn test_upgrade_preserves_every_vault_across_many_entries() {
     let admin = Address::generate(&env);
     let user_a = Address::generate(&env);
     let user_b = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (asset_1_client, asset_1) = create_token_contract(&env, &token_admin);
@@ -1528,7 +1533,7 @@ fn test_withdraw_success_keeps_stored_and_token_balances_consistent() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1569,7 +1574,7 @@ fn test_vault_takes_no_fee_on_any_path() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1634,7 +1639,7 @@ fn test_withdraw_timelock_failure_moves_no_tokens_and_changes_no_balance() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1660,7 +1665,7 @@ fn test_withdraw_insufficient_balance_moves_no_tokens_and_changes_no_balance() {
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
@@ -1775,7 +1780,7 @@ fn assert_unauthorized(result: WhitelistCallResult) {
 /// call under test runs with only the auth it is explicitly given.
 fn setup_whitelist_fixture(env: &Env, admin: &Address) -> (LumensVaultClient<'static>, Address) {
     env.mock_all_auths();
-    let vault_client = setup(env, admin, 10);
+    let vault_client = setup(env, admin, 10, 10);
 
     let token_admin = Address::generate(env);
     let (token_client, _) = create_token_contract(env, &token_admin);
@@ -2058,7 +2063,7 @@ fn test_deposit_and_withdraw_require_the_funds_owners_authorization() {
     // both need real authorization); every call under test runs with only
     // the auth it is explicitly given.
     env.mock_all_auths();
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
     let token_admin = Address::generate(&env);
     let (token_client, token_asset) = create_token_contract(&env, &token_admin);
     token_asset.mint(&owner, &1000);
@@ -2209,7 +2214,7 @@ fn test_admin_state_survives_upgrade() {
     env.ledger().with_mut(|l| l.sequence_number = 1000);
 
     let admin = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     let asset_a = Address::generate(&env);
     let asset_b = Address::generate(&env);
@@ -2408,7 +2413,7 @@ fn test_admin_can_pause_and_unpause_and_is_paused_reflects_each() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     assert!(!vault_client.is_paused());
 
@@ -2427,7 +2432,7 @@ fn test_non_admin_cannot_pause() {
 
     let admin = Address::generate(&env);
     let attacker = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     authorize_only_attacker(&env, &vault_client.address, &attacker, "pause");
     vault_client.pause();
@@ -2441,7 +2446,7 @@ fn test_non_admin_cannot_unpause() {
 
     let admin = Address::generate(&env);
     let attacker = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     // Legitimately paused first, so there is something to unpause.
     vault_client.pause();
@@ -2459,7 +2464,7 @@ fn test_non_admin_cannot_pause_while_already_paused() {
 
     let admin = Address::generate(&env);
     let attacker = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
 
     vault_client.pause();
     assert!(vault_client.is_paused());
@@ -2478,7 +2483,7 @@ fn test_every_event_stays_within_topic_ceiling() {
     let admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
     let user = Address::generate(&env);
-    let vault_client = setup(&env, &admin, 10);
+    let vault_client = setup(&env, &admin, 10, 10);
     let vault_address = vault_client.address.clone();
 
     let token_admin = Address::generate(&env);
@@ -2533,4 +2538,249 @@ fn test_every_event_stays_within_topic_ceiling() {
     let new_wasm_hash = install_new_wasm(&env);
     vault_client.upgrade(&new_wasm_hash);
     check("UpgradeEvent", 2);
+}
+
+/// Standard bounds for tests that don't care about them specifically.
+const MIN_LOCK: u32 = 10;
+
+const MAX_LOCK: u32 = 1000;
+
+#[test]
+fn test_constructor_rejects_min_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+
+    // Constructors reject invalid bounds by trapping via panic_with_error!,
+    // which aborts the deployment atomically — `register` panics here.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = env.register(LumensVault, (admin.clone(), 0u32, 100u32));
+    }));
+    assert!(result.is_err(), "min == 0 must be rejected at deploy time");
+}
+
+#[test]
+fn test_constructor_rejects_max_below_min() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = env.register(LumensVault, (admin.clone(), 100u32, 50u32));
+    }));
+    assert!(result.is_err(), "max < min must be rejected at deploy time");
+}
+
+#[test]
+fn test_constructor_accepts_inclusive_equal_bounds() {
+    // min == max is legal: the bounds are a closed interval, so a contract
+    // that only ever wants one fixed lock period is expressible.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 50, 50);
+    assert_eq!(vault_client.get_lock_bounds(), (50, 50));
+}
+
+#[test]
+fn test_deposit_rejects_lock_period_outside_bounds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, MIN_LOCK, MAX_LOCK);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // Below min.
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &(MIN_LOCK - 1));
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+    // Above max.
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &(MAX_LOCK + 1));
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+
+    // Rejections roll back atomically — no funds moved.
+    assert_eq!(token_client.balance(&user), 1000);
+    assert_eq!(token_client.balance(&vault_client.address), 0);
+
+    // Both boundary values are accepted: the range is inclusive at both
+    // ends. This is the detail that silently drifts between contract and
+    // UI, so it is pinned explicitly.
+    let id_min = vault_client.deposit(&user, &token_client.address, &10, &MIN_LOCK);
+    let id_max = vault_client.deposit(&user, &token_client.address, &10, &MAX_LOCK);
+    assert_eq!(id_min, 1);
+    assert_eq!(id_max, 2);
+
+    // unlock_ledger derives from the caller's lock_ledgers, not from any
+    // stored default — both deposits happened at the current sequence.
+    let entry_min = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(
+        entry_min.unlock_ledger,
+        env.ledger().sequence() + MIN_LOCK,
+        "unlock_ledger must derive from the caller's lock_ledgers"
+    );
+    let entry_max = vault_client.get_vault(&user, &token_client.address, &2);
+    assert_eq!(entry_max.unlock_ledger, env.ledger().sequence() + MAX_LOCK);
+}
+
+#[test]
+fn test_deposit_overflowing_lock_period_returns_clean_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, MIN_LOCK, u32::MAX);
+    // The default test ledger starts at sequence 0, where `0 + u32::MAX` does
+    // not overflow and the deposit would simply succeed. Move the sequence
+    // forward so the addition genuinely wraps.
+    env.ledger().with_mut(|l| l.sequence_number = 100);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // MAX_LOCK is u32::MAX so the bounds check passes, but the ledger
+    // sequence + lock_ledgers overflows u32. This must be a clean,
+    // decodable error — not a trap from the release profile's
+    // overflow-checks, which would give the client no decodable variant.
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &u32::MAX);
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+
+    // No funds moved and no vault was created.
+    assert_eq!(token_client.balance(&user), 1000);
+    assert_eq!(vault_client.get_user_vault_count(&user), 0);
+}
+
+#[test]
+fn test_deposit_fails_cleanly_when_user_vault_count_is_maxed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, MIN_LOCK, MAX_LOCK);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // Pin the per-user counter at u32::MAX directly, so the next deposit
+    // would overflow it. Needs contract context to write storage.
+    let count_key = DataKey::UserVaultCount(user.clone());
+    env.as_contract(&vault_client.address, || {
+        env.storage().persistent().set(&count_key, &u32::MAX);
+    });
+
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
+    assert_eq!(res, Err(Ok(Error::VaultIdOverflow)));
+
+    // The counter must be unchanged — a failed deposit must not consume
+    // or wrap the id space.
+    assert_eq!(vault_client.get_user_vault_count(&user), u32::MAX);
+}
+
+#[test]
+fn test_update_config_rejects_invalid_bounds_and_applies_valid_ones() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, MIN_LOCK, MAX_LOCK);
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // Deposit under the ORIGINAL bounds first: this vault's terms are
+    // fixed at deposit time and the rest of the test must not move them.
+    vault_client.deposit(&user, &token_client.address, &100, &10);
+    let entry_before = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(entry_before.unlock_ledger, env.ledger().sequence() + 10);
+
+    // Invalid: min == 0.
+    let res = vault_client.try_update_config(&0, &500);
+    assert_eq!(res, Err(Ok(Error::InvalidLockBounds)));
+    // Invalid: max < min.
+    let res = vault_client.try_update_config(&500, &100);
+    assert_eq!(res, Err(Ok(Error::InvalidLockBounds)));
+
+    // Failed updates must leave the stored bounds untouched.
+    assert_eq!(vault_client.get_lock_bounds(), (MIN_LOCK, MAX_LOCK));
+
+    // Valid change applies.
+    vault_client.update_config(&20, &200);
+    assert_eq!(vault_client.get_lock_bounds(), (20, 200));
+
+    // A subsequent deposit validates against the NEW bounds: 10 is now
+    // below the new min and must be rejected even though it was valid
+    // when vault 1 was created; 20 is the inclusive edge and is accepted.
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
+    // InvalidLockPeriod, not InvalidLockBounds: the bounds are fine, it is the
+    // period the depositor chose that sits outside them.
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
+    vault_client.deposit(&user, &token_client.address, &100, &20);
+
+    // Existing vaults are unaffected by a bounds change — their
+    // unlock_ledger was fixed at deposit time.
+    let entry_after = vault_client.get_vault(&user, &token_client.address, &1);
+    assert_eq!(
+        entry_after.unlock_ledger, entry_before.unlock_ledger,
+        "a bounds change must never touch already-existing vaults"
+    );
+}
+
+#[test]
+fn test_update_config_publishes_config_updated_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let vault_client = setup(&env, &admin, MIN_LOCK, MAX_LOCK);
+
+    let events_before = env.events().all().events().len();
+    vault_client.update_config(&30, &300);
+    let events_after = env.events().all().events().len();
+
+    assert_eq!(
+        events_after,
+        events_before + 1,
+        "update_config must publish exactly one ConfigUpdatedEvent"
+    );
+}
+
+#[test]
+fn test_get_lock_bounds_matches_deposit_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let (min, max) = (42u32, 4242u32);
+    let vault_client = setup(&env, &admin, min, max);
+
+    // The view must return exactly what a deposit validates against.
+    assert_eq!(vault_client.get_lock_bounds(), (min, max));
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+    vault_client.add_asset(&token_client.address);
+
+    // Edge values read from the view are accepted by deposit.
+    let (read_min, read_max) = vault_client.get_lock_bounds();
+    vault_client.deposit(&user, &token_client.address, &1, &read_min);
+    vault_client.deposit(&user, &token_client.address, &1, &read_max);
+
+    // One outside the read bounds is rejected.
+    let res = vault_client.try_deposit(&user, &token_client.address, &1, &(read_max + 1));
+    assert_eq!(res, Err(Ok(Error::InvalidLockPeriod)));
 }

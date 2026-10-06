@@ -213,6 +213,13 @@ impl LumensVault {
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
+        ConfigUpdatedEvent {
+            admin: admin.clone(),
+            min_lock_ledgers,
+            max_lock_ledgers,
+        }
+        .publish(&env);
+
         // Existing vaults are unaffected by a bounds change: their
         // `unlock_ledger` was fixed at deposit time and is never recomputed
         // from the current config. Changing the bounds only affects future
@@ -488,12 +495,17 @@ impl LumensVault {
     /// Shared bounds check used by both the constructor and `update_config`.
     /// Rejects a zero minimum and an inverted range with the same error the
     /// constructor uses, so the two paths cannot diverge.
+    // Returns InvalidLockBounds, not InvalidAmount. The bounds are not an
+    // amount, and reporting a lock-range problem as an amount problem sends
+    // the caller looking at the wrong argument. This is the same error the
+    // constructor traps with, so both paths now describe the fault
+    // identically.
     fn validate_lock_bounds(min_lock_ledgers: u32, max_lock_ledgers: u32) -> Result<(), Error> {
         if min_lock_ledgers == 0 {
-            return Err(Error::InvalidAmount);
+            return Err(Error::InvalidLockBounds);
         }
         if max_lock_ledgers < min_lock_ledgers {
-            return Err(Error::InvalidAmount);
+            return Err(Error::InvalidLockBounds);
         }
         Ok(())
     }
