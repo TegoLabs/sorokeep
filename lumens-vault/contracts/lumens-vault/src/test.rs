@@ -5,9 +5,9 @@ use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{
     testutils::{
         storage::{Instance, Persistent},
-        Address as _, Ledger, MockAuth, MockAuthInvoke,
+        Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke,
     },
-    Address, BytesN, ConversionError, Env, IntoVal, InvokeError,
+    Address, BytesN, ConversionError, Env, IntoVal, InvokeError, TryFromVal,
 };
 
 use crate::contract::Error;
@@ -2468,4 +2468,69 @@ fn test_non_admin_cannot_pause_while_already_paused() {
     // not silently succeed as a no-op.
     authorize_only_attacker(&env, &vault_client.address, &attacker, "pause");
     vault_client.pause();
+}
+
+#[test]
+fn test_every_event_stays_within_topic_ceiling() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+    let vault_address = vault_client.address.clone();
+
+    let token_admin = Address::generate(&env);
+    let (token_client, token_asset) = create_token_contract(&env, &token_admin);
+    token_asset.mint(&user, &1000);
+
+    // Soroban allows at most four topics per event. Exceeding it fails at
+    // runtime, not compile time, so every event the contract can emit needs
+    // checking.
+    //
+    // Checked per call rather than in one sweep at the end: in soroban-sdk 28
+    // `env.events().all()` returns only the most recent invocation's events,
+    // so collecting across the whole test sees just the last one.
+    let check = |label: &str, expected_topics: usize| {
+        let events = env.events().all().filter_by_contract(&vault_address);
+        let events = events.events();
+        assert_eq!(events.len(), 1, "{label} should emit exactly one event");
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &events[0].body;
+        assert_eq!(
+            body.topics.len(),
+            expected_topics,
+            "unexpected topic count for {label}"
+        );
+        assert!(
+            body.topics.len() <= 4,
+            "{label} exceeds Soroban's 4-topic ceiling"
+        );
+    };
+
+    vault_client.pause();
+    check("PauseEvent", 2);
+
+    vault_client.unpause();
+    check("UnpauseEvent", 2);
+
+    vault_client.add_asset(&token_client.address);
+    check("WhitelistEvent", 2);
+
+    let vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
+    check("DepositEvent", 3);
+
+    env.ledger().with_mut(|ledger| ledger.sequence_number += 11);
+    vault_client.withdraw(&user, &token_client.address, &vault_id, &40);
+    check("WithdrawEvent", 3);
+
+    vault_client.remove_asset(&token_client.address);
+    check("DelistEvent", 2);
+
+    vault_client.transfer_admin(&new_admin);
+    check("NewAdminEvent", 2);
+
+    let new_wasm_hash = install_new_wasm(&env);
+    vault_client.upgrade(&new_wasm_hash);
+    check("UpgradeEvent", 2);
 }
