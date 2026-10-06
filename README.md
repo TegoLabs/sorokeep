@@ -4,6 +4,8 @@
     <a href="README.es.md">Español</a>
     &middot;
     <a href="README.pt.md">Português (Brasil)</a>
+    &middot;
+    <a href="README.zh.md">简体中文</a>
   </p>
   <p align="center">
     The missing operations layer for deployed Soroban smart contracts.
