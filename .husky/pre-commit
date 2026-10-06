@@ -1,5 +1,7 @@
 #!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
+# No `. "$(dirname "$0")/_/husky.sh"` line: that is husky v8 syntax and
+# husky v9 (declared in package.json) removed the file it sources, so
+# keeping it makes every commit fail on a missing path.
 
 # 1. Run gitleaks for generic high-entropy strings and AWS keys
 if command -v gitleaks >/dev/null 2>&1; then
