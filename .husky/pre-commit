@@ -1,0 +1,22 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+# 1. Run gitleaks for generic high-entropy strings and AWS keys
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "Running gitleaks..."
+  gitleaks protect --staged --redact --verbose || {
+    echo "Error: gitleaks detected secrets! Please remove them and try again."
+    exit 1
+  }
+else
+  echo "Notice: gitleaks is not installed locally. Skipping advanced secret scanning."
+fi
+
+# 2. Check explicitly for Stellar secret keys (starts with S, 56 characters, base32)
+if git diff --cached | grep -qE '\bS[A-Z2-7]{55}\b'; then
+  echo "Error: Stellar secret key detected in staged files. Commit blocked."
+  exit 1
+fi
+
+exit 0
+
