@@ -80,8 +80,12 @@ impl LumensVault {
         Self::validate_lock_bounds(default_timelock_ledgers, default_timelock_ledgers)
             .expect("invalid default timelock");
 
+        // A fresh vault pins both bounds to the same value, which is what the
+        // single-field config meant in practice. The admin widens the range
+        // later via `update_config`.
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers,
+            min_lock_ledgers: default_timelock_ledgers,
+            max_lock_ledgers: default_timelock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -196,8 +200,12 @@ impl LumensVault {
         // have refused.
         Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers)?;
 
+        // Both bounds are now stored. Previously the config held a single
+        // field, so this validated `min_lock_ledgers` and then discarded it --
+        // the minimum an admin set was silently unenforceable afterwards.
         let config = VaultConfig::V1(VaultConfigV1 {
-            default_timelock_ledgers: max_lock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -266,7 +274,12 @@ impl LumensVault {
         let unlock_ledger = env
             .ledger()
             .sequence()
-            .checked_add(config.default_timelock_ledgers)
+            // Deliberately `max_lock_ledgers`, to hold behaviour exactly where
+            // it was: `update_config` used to write `max_lock_ledgers` into the
+            // single config field that this read. Letting a depositor choose a
+            // period inside [min, max] is a separate change (#1066), not one to
+            // make silently while renaming a field.
+            .checked_add(config.max_lock_ledgers)
             .ok_or(Error::InvalidLockPeriod)?;
 
         let vault_entry = VaultEntry::V1(VaultEntryV1 {
