@@ -47,7 +47,9 @@
     "glob": "11.1.0",
     "axios": "1.20.0",
     "fast-uri": "3.1.8",
-    "ip-address": "10.7.2"
+    "ip-address": "10.7.2",
+    "proxy-addr": "2.0.8",
+    "smol-toml": "1.9.0"
   },
   "license": "MIT",
   "type": "module",
