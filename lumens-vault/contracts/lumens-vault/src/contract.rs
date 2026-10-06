@@ -424,6 +424,15 @@ impl LumensVault {
         }
     }
 
+    /// Returns the configured (min, max) lock-period bounds in ledgers.
+    pub fn get_lock_bounds(env: Env) -> Result<(u32, u32), Error> {
+        let config = Self::get_config(&env)?;
+        Ok((
+            config.min_timelock_ledgers,
+            config.max_timelock_ledgers,
+        ))
+    }
+
     pub fn is_whitelisted(env: Env, asset: Address) -> bool {
         env.storage()
             .instance()
