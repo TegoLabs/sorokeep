@@ -25,21 +25,24 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: devops/pulumi/package.json
 
       - name: Install dependencies
         run: npm install
 
-      - name: Setup Pulumi
-        uses: pulumi/action-pulumi@v3
-        with:
-          pulumi-version: '^3.0.0'
-
-      - name: Run Pulumi Preview (Dry-Run)
-        run: pulumi preview --non-interactive --stack dev
-        env:
-          PULUMI_ACCESS_TOKEN: "mock_pulumi_token_for_ci_preview"
-          AWS_ACCESS_KEY_ID: "mock_access_key"
-          AWS_SECRET_ACCESS_KEY: "mock_secret_key"
-          AWS_DEFAULT_REGION: "us-east-1"
+      # Type-checks the Pulumi program. This replaces a `pulumi preview` step
+      # that could never have passed: it used `pulumi/action-pulumi@v3`, which
+      # does not exist ("Unable to resolve action ... repository not found"),
+      # and even once resolved it ran `preview --stack dev` against
+      # PULUMI_ACCESS_TOKEN: "mock_pulumi_token_for_ci_preview". A preview has
+      # to reach a real backend and read real stack state, so a placeholder
+      # token cannot work. The workflow had been red since at least 6
+      # September.
+      #
+      # A genuine preview needs a PULUMI_ACCESS_TOKEN secret and real cloud
+      # credentials. Until those exist, compiling the program is the strongest
+      # claim this job can honestly make -- it catches the errors that actually
+      # occur here (a typo in a resource property, a bad import, drift between
+      # stack.ts and index.ts) rather than reporting a green tick for a command
+      # that never ran.
+      - name: Type-check the Pulumi program
+        run: npx tsc --noEmit
