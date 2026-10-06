@@ -25,6 +25,8 @@ pub enum VaultConfig {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfigV1 {
+    // The fixture never reads DataKey::Config; this shape is retained solely
+    // for byte-parity with the real contract's storage types.
     pub default_timelock_ledgers: u32,
 }
 
