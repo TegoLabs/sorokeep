@@ -1,4 +1,6 @@
-use soroban_sdk::{contract, contracterror, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, panic_with_error, token, Address, BytesN, Env,
+};
 
 use crate::events::*;
 use crate::storage::{
@@ -29,8 +31,9 @@ pub enum Error {
     TimelockNotExpired = 5,
     VaultNotFound = 6,
     InvalidAmount = 7,
-VaultIdOverflow = 8,
+    VaultIdOverflow = 8,
     InvalidLockPeriod = 9,
+    InvalidLockBounds = 10,
 }
 
 const DAY_IN_LEDGERS: u32 = 17280; // 86,400s / 5s-per-ledger
@@ -71,16 +74,18 @@ impl LumensVault {
     pub fn __constructor(env: Env, admin: Address, min_lock_ledgers: u32, max_lock_ledgers: u32) {
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        // A zero minimum or inverted range would make the vault unusable until
+        // an upgrade. Shares `update_config`'s validation so the constructor
+        // and the admin path cannot drift apart, and rejects before any
+        // instance storage is written, so a vault that was never validly
+        // configured does not come into existence at all. `panic_with_error!`
+        // rather than `.expect()` so callers see the typed contract error
+        // instead of an opaque host panic string.
+        if Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers).is_err() {
+            panic_with_error!(&env, Error::InvalidLockBounds);
+        }
 
-        // Validate the initial bounds with the same helper `update_config`
-        // uses, so the constructor and the admin path can never drift apart.
-        // A zero minimum or an inverted range is rejected here exactly as a
-        // later `update_config` call would reject it. Panicking is correct for
-        // a constructor: a vault that was never validly configured must not
-        // come into existence at all.
-        Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers)
-            .expect("invalid lock bounds");
+        env.storage().instance().set(&DataKey::Admin, &admin);
 
         let config = VaultConfig::V1(VaultConfigV1 {
             min_lock_ledgers,
