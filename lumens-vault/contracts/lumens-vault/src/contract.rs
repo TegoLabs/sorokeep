@@ -107,7 +107,7 @@ impl LumensVault {
 
     pub fn pause(env: Env) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
-        // admin.require_auth();
+        admin.require_auth();
 
         let state = VaultState::V1(VaultStateV1 { is_paused: true });
         env.storage().instance().set(&DataKey::State, &state);
