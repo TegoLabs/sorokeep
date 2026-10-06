@@ -19,6 +19,9 @@
                 },
                 {
                   "u32": 10
+                },
+                {
+                  "u32": 10
                 }
               ]
             }
@@ -256,21 +259,6 @@
                       "key": {
                         "vec": [
                           {
-                            "symbol": "AssetWhitelist"
-                          },
-                          {
-                            "address": "CCABDO7UZXYE4W6GVSEGSNNZTKSLFQGKXXQTH6OX7M7GKZ4Z6CUJNGZN"
-                          }
-                        ]
-                      },
-                      "val": {
-                        "bool": false
-                      }
-                    },
-                    {
-                      "key": {
-                        "vec": [
-                          {
                             "symbol": "Config"
                           }
                         ]
@@ -284,7 +272,15 @@
                             "map": [
                               {
                                 "key": {
-                                  "symbol": "default_timelock_ledgers"
+                                  "symbol": "max_lock_ledgers"
+                                },
+                                "val": {
+                                  "u32": 10
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "min_lock_ledgers"
                                 },
                                 "val": {
                                   "u32": 10

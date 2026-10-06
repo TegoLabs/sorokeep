@@ -34,8 +34,11 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, St
 }
 
 /// `env.register` passes constructor arguments directly to `__constructor`.
-fn setup(env: &Env, admin: &Address, default_timelock_ledgers: u32) -> LumensVaultClient<'static> {
-    let vault_id = env.register(LumensVault, (admin, default_timelock_ledgers));
+/// Builds a vault whose min and max lock bounds are both `lock_ledgers`, so
+/// the only period a deposit can legally pass is that same value. Tests that
+/// care about the range use `setup_boundary_vault` instead.
+fn setup(env: &Env, admin: &Address, lock_ledgers: u32) -> LumensVaultClient<'static> {
+    let vault_id = env.register(LumensVault, (admin, lock_ledgers, lock_ledgers));
     LumensVaultClient::new(env, &vault_id)
 }
 
@@ -56,7 +59,7 @@ fn test_deposit_and_withdraw() {
 
     vault_client.add_asset(&token_client.address);
 
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
     assert_eq!(returned_vault_id, 1);
 
     assert_eq!(token_client.balance(&user), 900);
@@ -94,10 +97,10 @@ fn test_deposit_rejects_non_positive_amount() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0);
+    let zero_res = vault_client.try_deposit(&user, &token_client.address, &0, &10);
     assert!(zero_res.is_err());
 
-    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100);
+    let negative_res = vault_client.try_deposit(&user, &token_client.address, &-100, &10);
     assert!(negative_res.is_err());
 }
 
@@ -119,7 +122,7 @@ fn test_withdraw_rejects_non_positive_amount() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &-200);
@@ -157,9 +160,9 @@ fn test_withdraw_extends_ttl_of_only_the_entries_it_touches() {
 
     // Two vaults for the same user, so there is a second Vault entry that
     // the withdrawal must not touch.
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
     env.ledger().with_mut(|l| l.sequence_number += 5);
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let vault_1_key = DataKey::Vault(user.clone(), token_client.address.clone(), 1);
     let vault_2_key = DataKey::Vault(user.clone(), token_client.address.clone(), 2);
@@ -219,7 +222,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let count_key = DataKey::UserVaultCount(user.clone());
     let ttl_after_first_deposit =
@@ -230,7 +233,7 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
     env.ledger()
         .with_mut(|l| l.sequence_number += ttl_after_first_deposit - 1000);
 
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let ttl_after_second_deposit =
         env.as_contract(&vault_client.address, || env.storage().persistent().get_ttl(&count_key));
@@ -278,7 +281,7 @@ fn test_multi_asset_vault_ids_are_per_user() {
     token_asset.mint(&user, &1000);
 
     // Deliberately do NOT call `vault_client.add_asset`.
-    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
     assert_eq!(res, Err(Ok(Error::AssetNotWhitelisted)));
 
     // No vault was created, and no tokens moved.
@@ -304,7 +307,7 @@ fn test_withdraw_rejects_insufficient_balance() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     // Advance past the lock so the failure cannot be attributed to
     // TimelockNotExpired.
     env.ledger().with_mut(|l| l.sequence_number += 11);
@@ -339,7 +342,7 @@ fn test_withdraw_timelock_boundary_is_inclusive() {
     vault_client.add_asset(&token_client.address);
 
     // Ledger starts at 0; deposit → unlock_ledger = 10.
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     let entry = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(entry.unlock_ledger, 10);
 
@@ -412,7 +415,7 @@ fn test_withdraw_rejects_zero_amount() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &0);
@@ -437,8 +440,8 @@ fn test_withdraw_rejects_zero_amount() {
     vault_client.add_asset(&token_b_client.address);
 
     // AC1: vault ids are 1 and 2 — counter is shared per user, not per asset.
-    let id_a = vault_client.deposit(&user, &token_a_client.address, &300);
-    let id_b = vault_client.deposit(&user, &token_b_client.address, &500);
+    let id_a = vault_client.deposit(&user, &token_a_client.address, &300, &10);
+    let id_b = vault_client.deposit(&user, &token_b_client.address, &500, &10);
 
     assert_eq!(id_a, 1, "first deposit (asset A) should be vault id 1");
     assert_eq!(id_b, 2, "second deposit (asset B) should be vault id 2");
@@ -503,7 +506,7 @@ fn test_deposit_extends_ttl_of_only_the_entries_it_touches() {
 
     // First deposit creates vault #1. This is the entry the *second*
     // deposit must leave completely alone.
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let vault_1_key = DataKey::Vault(user.clone(), token_client.address.clone(), 1);
     let vault_2_key = DataKey::Vault(user.clone(), token_client.address.clone(), 2);
@@ -535,7 +538,7 @@ fn test_deposit_extends_ttl_of_only_the_entries_it_touches() {
     // Second deposit for the same user: allocates vault #2 and touches
     // UserVaultCount plus instance storage via check_paused and
     // check_whitelisted. Vault #1 is not part of this call at all.
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     assert_eq!(
         persistent_ttl(&vault_1_key),
@@ -575,13 +578,13 @@ fn test_delisting_blocks_deposits_but_never_traps_existing_funds() {
     
     // Deposit while whitelisted
     vault_client.add_asset(&token_client.address);
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
 
     // Delist the asset
     vault_client.remove_asset(&token_client.address);
 
     // Assert a new deposit of the delisted asset fails with AssetNotWhitelisted
-    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
     assert_eq!(res, Err(Ok(crate::contract::Error::AssetNotWhitelisted)));
 
     // Mature the lock
@@ -616,7 +619,7 @@ fn test_partial_withdrawal_leaves_remainder_locked_under_the_same_terms() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
 
     let original = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(original.amount, 100);
@@ -688,7 +691,7 @@ fn test_deposit_fails_while_paused() {
     vault_client.pause();
     assert!(vault_client.is_paused());
 
-    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
     assert_eq!(res, Err(Ok(Error::Paused)));
 
     // The rejected deposit changed nothing: no tokens left the user, the
@@ -712,7 +715,7 @@ fn test_withdraw_of_matured_vault_fails_while_paused() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
 
     // Mature the vault: land exactly on unlock_ledger (the inclusive
     // boundary pinned by E05-11), so the timelock alone would allow the
@@ -766,7 +769,7 @@ fn test_withdraw_is_allowed_at_exactly_unlock_ledger_and_rejected_one_ledger_bef
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
     let unlock_ledger = vault_client
         .get_vault(&user, &token_client.address, &1)
         .unlock_ledger;
@@ -810,7 +813,7 @@ fn test_deposit_and_withdraw_succeed_after_unpause() {
 
     // Both operations work again after unpause — a pause must never lock
     // funds permanently.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &100, &10);
     assert_eq!(returned_vault_id, 1);
 
     let unlock_ledger = vault_client
@@ -844,9 +847,9 @@ fn test_pause_does_not_change_any_vaults_unlock_ledger() {
 
     // Two vaults for the same user, deposited at different ledger
     // sequences so their unlock_ledgers differ.
-    vault_client.deposit(&user, &token_client.address, &100);
+    vault_client.deposit(&user, &token_client.address, &100, &10);
     env.ledger().with_mut(|l| l.sequence_number += 5);
-    vault_client.deposit(&user, &token_client.address, &50);
+    vault_client.deposit(&user, &token_client.address, &50, &10);
 
     let unlock_ledger_vault_1 = vault_client
         .get_vault(&user, &token_client.address, &1)
@@ -963,7 +966,7 @@ fn test_constructor_writes_all_instance_keys_atomically() {
     vault_client.add_asset(&token_client.address);
 
     let start_ledger = env.ledger().sequence();
-    let vault_id = vault_client.deposit(&admin, &token_client.address, &1);
+    let vault_id = vault_client.deposit(&admin, &token_client.address, &1, &timelock_ledgers);
 
     let entry = vault_client.get_vault(&admin, &token_client.address, &vault_id);
     assert_eq!(
@@ -1102,7 +1105,7 @@ fn test_real_upgrade_and_state_migration() {
 
     // 1. Write real state through the OLD contract's own deposit logic —
     //    not a raw storage poke.
-    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500);
+    let returned_vault_id = vault_client.deposit(&user, &token_client.address, &500, &10);
     assert_eq!(returned_vault_id, 1);
     assert_eq!(vault_client.version(), 1);
 
@@ -1188,7 +1191,7 @@ fn test_deposit_and_withdraw_at_i128_extremes_do_not_corrupt_balances() {
     assert_eq!(asset_2_client.balance(&user), i128::MAX);
 
     // A deposit of i128::MAX succeeds and is stored exactly as supplied.
-    let vault_id = vault_client.deposit(&user, &asset_1_client.address, &i128::MAX);
+    let vault_id = vault_client.deposit(&user, &asset_1_client.address, &i128::MAX, &10);
     assert_eq!(vault_id, 1);
     let extreme = vault_client.get_vault(&user, &asset_1_client.address, &1);
     assert_eq!(extreme.amount, i128::MAX);
@@ -1201,7 +1204,7 @@ fn test_deposit_and_withdraw_at_i128_extremes_do_not_corrupt_balances() {
     // and no on-chain addition of one vault's amount to another's, so there
     // is no summation that could overflow. The second extreme deposit leaves
     // the first entry exactly as it was.
-    let second_id = vault_client.deposit(&user, &asset_2_client.address, &i128::MAX);
+    let second_id = vault_client.deposit(&user, &asset_2_client.address, &i128::MAX, &10);
     assert_eq!(second_id, 2);
     assert_eq!(
         vault_client.get_vault(&user, &asset_1_client.address, &1).amount,
@@ -1250,7 +1253,7 @@ fn test_deposit_with_insufficient_balance_creates_no_vault() {
     let vault_count_before = vault_client.get_user_vault_count(&user);
 
     // This must fail because the user has insufficient balance.
-    let res = vault_client.try_deposit(&user, &token_client.address, &100);
+    let res = vault_client.try_deposit(&user, &token_client.address, &100, &10);
     assert!(res.is_err(), "Deposit with insufficient balance must fail");
 
     // CRITICAL: After the failed deposit, no vault should exist and no
@@ -1286,7 +1289,7 @@ fn test_deposit_with_insufficient_balance_creates_no_vault() {
     // Positive control: a deposit within the user's balance succeeds,
     // proving the setup is sound and only the insufficient balance caused
     // the earlier failure.
-    let success_res = vault_client.deposit(&user, &token_client.address, &50);
+    let success_res = vault_client.deposit(&user, &token_client.address, &50, &10);
     assert_eq!(success_res, 1, "Deposit within balance must succeed");
     
     assert_eq!(vault_client.get_user_vault_count(&user), 1);
@@ -1435,14 +1438,14 @@ fn test_upgrade_preserves_every_vault_across_many_entries() {
     // the unlock_ledgers are not all identical. Vault ids are allocated per
     // user, so each user's three deposits take ids 1, 2 and 3 regardless of
     // which asset they are in.
-    vault_client.deposit(&user_a, &asset_1_client.address, &100); // A/asset_1/1
-    vault_client.deposit(&user_a, &asset_2_client.address, &200); // A/asset_2/2
+    vault_client.deposit(&user_a, &asset_1_client.address, &100, &10); // A/asset_1/1
+    vault_client.deposit(&user_a, &asset_2_client.address, &200, &10); // A/asset_2/2
     env.ledger().with_mut(|l| l.sequence_number += 7);
-    vault_client.deposit(&user_a, &asset_1_client.address, &300); // A/asset_1/3
-    vault_client.deposit(&user_b, &asset_1_client.address, &400); // B/asset_1/1
+    vault_client.deposit(&user_a, &asset_1_client.address, &300, &10); // A/asset_1/3
+    vault_client.deposit(&user_b, &asset_1_client.address, &400, &10); // B/asset_1/1
     env.ledger().with_mut(|l| l.sequence_number += 5);
-    vault_client.deposit(&user_b, &asset_2_client.address, &500); // B/asset_2/2
-    vault_client.deposit(&user_b, &asset_2_client.address, &600); // B/asset_2/3
+    vault_client.deposit(&user_b, &asset_2_client.address, &500, &10); // B/asset_2/2
+    vault_client.deposit(&user_b, &asset_2_client.address, &600, &10); // B/asset_2/3
 
     assert_eq!(vault_client.get_user_vault_count(&user_a), 3);
     assert_eq!(vault_client.get_user_vault_count(&user_b), 3);
@@ -1532,7 +1535,7 @@ fn test_withdraw_success_keeps_stored_and_token_balances_consistent() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     vault_client.withdraw(&user, &token_client.address, &1, &200);
@@ -1576,7 +1579,7 @@ fn test_vault_takes_no_fee_on_any_path() {
     // Full round trip. What leaves the user's account must be exactly what
     // comes back, and the contract must hold nothing afterwards.
     let user_before = token_client.balance(&user);
-    vault_client.deposit(&user, &token_client.address, &1000);
+    vault_client.deposit(&user, &token_client.address, &1000, &10);
 
     let deposited = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(
@@ -1600,7 +1603,7 @@ fn test_vault_takes_no_fee_on_any_path() {
     // hide there, and the reconciliation across the whole round trip is
     // what would expose it.
     let user_before_partial = token_client.balance(&user);
-    let partial_vault_id = vault_client.deposit(&user, &token_client.address, &1000);
+    let partial_vault_id = vault_client.deposit(&user, &token_client.address, &1000, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
     vault_client.withdraw(&user, &token_client.address, &partial_vault_id, &250);
 
@@ -1638,7 +1641,7 @@ fn test_withdraw_timelock_failure_moves_no_tokens_and_changes_no_balance() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
 
     // Timelock (10 ledgers) has not elapsed.
     let res = vault_client.try_withdraw(&user, &token_client.address, &1, &200);
@@ -1664,7 +1667,7 @@ fn test_withdraw_insufficient_balance_moves_no_tokens_and_changes_no_balance() {
     token_asset.mint(&user, &1000);
     vault_client.add_asset(&token_client.address);
 
-    vault_client.deposit(&user, &token_client.address, &500);
+    vault_client.deposit(&user, &token_client.address, &500, &10);
     env.ledger().with_mut(|l| l.sequence_number += 11);
 
     // Timelock has elapsed, but the request exceeds the deposited balance.
@@ -1961,7 +1964,7 @@ fn test_add_asset_rejects_non_admin_and_leaves_asset_unlisted() {
 /// `Error` vs host `InvokeError`.
 type DepositCallResult = Result<Result<u32, ConversionError>, Result<Error, InvokeError>>;
 
-/// `deposit(from, asset, amount)` authorized by exactly `signer`. When
+/// `deposit(from, asset, amount, lock_ledgers)` authorized by exactly `signer`. When
 /// `signer != from` this is the "someone else authorizes it" case.
 fn deposit_authorized_by(
     env: &Env,
@@ -1970,6 +1973,7 @@ fn deposit_authorized_by(
     from: &Address,
     asset: &Address,
     amount: i128,
+    lock_ledgers: u32,
 ) -> DepositCallResult {
     // `deposit` also performs the token transfer in the same call, and that
     // nested `transfer` requires the sender's authorization as well — so the
@@ -1984,7 +1988,7 @@ fn deposit_authorized_by(
     let invoke = MockAuthInvoke {
         contract: &vault.address,
         fn_name: "deposit",
-        args: (from.clone(), asset.clone(), amount).into_val(env),
+        args: (from.clone(), asset.clone(), amount, lock_ledgers).into_val(env),
         sub_invokes: &sub_invokes,
     };
     let auths = [MockAuth {
@@ -1993,7 +1997,7 @@ fn deposit_authorized_by(
     }];
     vault
         .mock_auths(&auths)
-        .try_deposit(from, asset, &amount)
+        .try_deposit(from, asset, &amount, &lock_ledgers)
 }
 
 /// `withdraw(to, asset, vault_id, amount)` authorized by exactly `signer`.
@@ -2070,6 +2074,7 @@ fn test_deposit_and_withdraw_require_the_funds_owners_authorization() {
         &owner,
         &token_client.address,
         100,
+        10,
     ));
     assert_eq!(
         vault_client.get_user_vault_count(&owner),
@@ -2088,6 +2093,7 @@ fn test_deposit_and_withdraw_require_the_funds_owners_authorization() {
             &owner,
             &token_client.address,
             100,
+            10,
         ),
         "the owner's deposit",
     );

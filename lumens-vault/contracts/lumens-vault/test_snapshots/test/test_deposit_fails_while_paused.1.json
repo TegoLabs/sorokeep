@@ -19,6 +19,9 @@
                 },
                 {
                   "u32": 10
+                },
+                {
+                  "u32": 10
                 }
               ]
             }
@@ -279,7 +282,15 @@
                             "map": [
                               {
                                 "key": {
-                                  "symbol": "default_timelock_ledgers"
+                                  "symbol": "max_lock_ledgers"
+                                },
+                                "val": {
+                                  "u32": 10
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "min_lock_ledgers"
                                 },
                                 "val": {
                                   "u32": 10

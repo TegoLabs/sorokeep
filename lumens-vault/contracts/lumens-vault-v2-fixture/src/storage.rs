@@ -26,8 +26,13 @@ pub enum VaultConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfigV1 {
     // The fixture never reads DataKey::Config; this shape is retained solely
-    // for byte-parity with the real contract's storage types.
-    pub default_timelock_ledgers: u32,
+    // for byte-parity with the real contract's storage types. It therefore has
+    // to track that contract: #1075 replaced the single
+    // `default_timelock_ledgers` with the pair below, and leaving the old
+    // field here would mean the upgrade target disagreed with the contract it
+    // upgrades, which is exactly the drift the parity is meant to prevent.
+    pub min_lock_ledgers: u32,
+    pub max_lock_ledgers: u32,
 }
 
 /// The deliberate schema change this whole fixture exists to test: a new

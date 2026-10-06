@@ -68,24 +68,23 @@ impl LumensVault {
     // Note: `///` doc comments on contract functions are embedded in the wasm's
     // spec metadata and are paid for in rent forever. Keep them to one line and
     // put the reasoning in `//` comments like this one.
-    pub fn __constructor(env: Env, admin: Address, default_timelock_ledgers: u32) {
+    pub fn __constructor(env: Env, admin: Address, min_lock_ledgers: u32, max_lock_ledgers: u32) {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
 
         // Validate the initial bounds with the same helper `update_config`
         // uses, so the constructor and the admin path can never drift apart.
-        // A zero minimum or an inverted range is rejected here with the same
-        // error a later `update_config` call would return.
-        Self::validate_lock_bounds(default_timelock_ledgers, default_timelock_ledgers)
-            .expect("invalid default timelock");
+        // A zero minimum or an inverted range is rejected here exactly as a
+        // later `update_config` call would reject it. Panicking is correct for
+        // a constructor: a vault that was never validly configured must not
+        // come into existence at all.
+        Self::validate_lock_bounds(min_lock_ledgers, max_lock_ledgers)
+            .expect("invalid lock bounds");
 
-        // A fresh vault pins both bounds to the same value, which is what the
-        // single-field config meant in practice. The admin widens the range
-        // later via `update_config`.
         let config = VaultConfig::V1(VaultConfigV1 {
-            min_lock_ledgers: default_timelock_ledgers,
-            max_lock_ledgers: default_timelock_ledgers,
+            min_lock_ledgers,
+            max_lock_ledgers,
         });
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -233,7 +232,17 @@ impl LumensVault {
 
     // --- Vault operations ---
 
-    pub fn deposit(env: Env, from: Address, asset: Address, amount: i128) -> Result<u32, Error> {
+    // `lock_ledgers` is chosen by the depositor and must fall inside the
+    // admin's [min, max] range. Until it existed the range was unenforceable
+    // in practice -- every deposit silently took the maximum, so a minimum
+    // bound described nothing.
+    pub fn deposit(
+        env: Env,
+        from: Address,
+        asset: Address,
+        amount: i128,
+        lock_ledgers: u32,
+    ) -> Result<u32, Error> {
         from.require_auth();
 
         if amount <= 0 {
@@ -242,6 +251,13 @@ impl LumensVault {
 
         Self::check_paused(&env)?;
         Self::check_whitelisted(&env, &asset)?;
+
+        // Checked before any token moves. A rejected lock period must leave
+        // the caller's balance and the vault untouched.
+        let config = Self::get_config(&env)?;
+        if lock_ledgers < config.min_lock_ledgers || lock_ledgers > config.max_lock_ledgers {
+            return Err(Error::InvalidLockPeriod);
+        }
 
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&from, &env.current_contract_address(), &amount);
@@ -270,16 +286,10 @@ impl LumensVault {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        let config = Self::get_config(&env)?;
         let unlock_ledger = env
             .ledger()
             .sequence()
-            // Deliberately `max_lock_ledgers`, to hold behaviour exactly where
-            // it was: `update_config` used to write `max_lock_ledgers` into the
-            // single config field that this read. Letting a depositor choose a
-            // period inside [min, max] is a separate change (#1066), not one to
-            // make silently while renaming a field.
-            .checked_add(config.max_lock_ledgers)
+            .checked_add(lock_ledgers)
             .ok_or(Error::InvalidLockPeriod)?;
 
         let vault_entry = VaultEntry::V1(VaultEntryV1 {

@@ -21,7 +21,7 @@
                   "u32": 10
                 },
                 {
-                  "u32": 10
+                  "u32": 100
                 }
               ]
             }
@@ -91,12 +91,11 @@
         }
       ]
     ],
-    [],
     []
   ],
   "ledger": {
     "protocol_version": 28,
-    "sequence_number": 0,
+    "sequence_number": 1000,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -143,7 +142,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 6312999
       },
       {
         "entry": {
@@ -163,7 +162,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 6312999
       },
       {
         "entry": {
@@ -183,7 +182,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 6312999
       },
       {
         "entry": {
@@ -247,7 +246,7 @@
                                   "symbol": "max_lock_ledgers"
                                 },
                                 "val": {
-                                  "u32": 10
+                                  "u32": 100
                                 }
                               },
                               {
@@ -298,7 +297,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 518400
+        "live_until": 519400
       },
       {
         "entry": {
@@ -318,7 +317,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 6312999
       },
       {
         "entry": {
@@ -370,7 +369,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 518400
+        "live_until": 519400
       },
       {
         "entry": {
@@ -473,7 +472,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 120960
+        "live_until": 121960
       },
       {
         "entry": {
@@ -487,7 +486,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 518400
+        "live_until": 519400
       }
     ]
   },
