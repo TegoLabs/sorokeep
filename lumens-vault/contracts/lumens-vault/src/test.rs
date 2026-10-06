@@ -254,6 +254,17 @@ fn test_user_vault_count_ttl_is_extended_on_deposit() {
 fn test_deposit_rejects_non_whitelisted_asset() {
     // AssetNotWhitelisted — the asset was never added via `add_asset`, so
     // `check_whitelisted` fails before any token movement happens.
+}
+
+// FR-4: vault IDs are per-user, not per-asset.
+//
+// The UserVaultCount key is DataKey::UserVaultCount(user) — it carries no
+// asset dimension. That means depositing into two different assets both
+// draw from the same counter, producing ids 1 and 2 rather than two
+// independent (1, 1) pairs.  This test exists to catch any future refactor
+// that accidentally introduces an asset dimension into that key.
+#[test]
+fn test_multi_asset_vault_ids_are_per_user() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -409,6 +420,58 @@ fn test_withdraw_rejects_zero_amount() {
     // Balance unchanged.
     let entry = vault_client.get_vault(&user, &token_client.address, &1);
     assert_eq!(entry.amount, 500);
+
+
+    let vault_client = setup(&env, &admin, 10);
+
+    // Two distinct tokens — same admin for brevity, independent contracts.
+    let token_admin = Address::generate(&env);
+    let (token_a_client, token_a_asset) = create_token_contract(&env, &token_admin);
+    let (token_b_client, token_b_asset) = create_token_contract(&env, &token_admin);
+
+    token_a_asset.mint(&user, &1000);
+    token_b_asset.mint(&user, &1000);
+
+    vault_client.add_asset(&token_a_client.address);
+    vault_client.add_asset(&token_b_client.address);
+
+    // AC1: vault ids are 1 and 2 — counter is shared per user, not per asset.
+    let id_a = vault_client.deposit(&user, &token_a_client.address, &300);
+    let id_b = vault_client.deposit(&user, &token_b_client.address, &500);
+
+    assert_eq!(id_a, 1, "first deposit (asset A) should be vault id 1");
+    assert_eq!(id_b, 2, "second deposit (asset B) should be vault id 2");
+
+    // AC2: get_vault returns the correct balance for each (asset, id) pair.
+    let entry_a = vault_client.get_vault(&user, &token_a_client.address, &1);
+    let entry_b = vault_client.get_vault(&user, &token_b_client.address, &2);
+
+    assert_eq!(entry_a.amount, 300, "vault 1 (asset A) should hold 300");
+    assert_eq!(entry_b.amount, 500, "vault 2 (asset B) should hold 500");
+
+    // AC3: get_user_vault_count returns 2.
+    assert_eq!(
+        vault_client.get_user_vault_count(&user),
+        2,
+        "user should have 2 vaults across both assets"
+    );
+
+    // AC4: withdrawing from vault 1 (asset A) leaves vault 2 (asset B) untouched.
+    env.ledger().with_mut(|l| l.sequence_number += 11);
+
+    vault_client.withdraw(&user, &token_a_client.address, &1, &100);
+
+    let entry_a_after = vault_client.get_vault(&user, &token_a_client.address, &1);
+    let entry_b_after = vault_client.get_vault(&user, &token_b_client.address, &2);
+
+    assert_eq!(
+        entry_a_after.amount, 200,
+        "vault 1 (asset A) should have 200 remaining after withdrawal"
+    );
+    assert_eq!(
+        entry_b_after.amount, 500,
+        "vault 2 (asset B) must be untouched by the withdrawal from vault 1"
+    );
 }
 
 // =====================================================================
