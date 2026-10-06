@@ -11,7 +11,8 @@ use soroban_sdk::{
 };
 
 use crate::contract::Error;
-use crate::storage::DataKey;
+
+use crate::storage::{DataKey, VaultConfig, VaultConfigV1, VaultState};
 use crate::{LumensVault, LumensVaultClient};
 
 // Build requirements:
@@ -2075,4 +2076,209 @@ fn test_remove_asset_rejects_non_admin_and_leaves_asset_whitelisted() {
         admin,
         "a rejected remove_asset must not disturb the admin either"
     );
+}
+
+// ---------------------------------------------------------------------
+// E05-18: admin state must survive an upgrade.
+//
+// Vault balances are the obvious thing to check across an upgrade (done
+// above), but admin, pause state and config live in *instance* storage and
+// are equally load-bearing — an upgrade that silently reset the admin would
+// hand the contract to nobody, or to whoever the new binary's constructor
+// names.
+//
+// What this test proves, and why each piece matters:
+//
+// 1. Every instance-storage key the OLD binary wrote (Admin, State,
+//    Config, AssetWhitelist) is still there with its pre-upgrade value
+//    after the SAME address has been swapped to a genuinely different
+//    binary — proven while `version() == 2` shows the new wasm is the one
+//    serving calls.
+//
+// 2. The new binary's constructor does NOT run on upgrade. `upgrade()` is
+//    `update_current_contract`: a bytecode swap that supplies no
+//    constructor arguments, and Soroban runs `__constructor` only at
+//    deploy time. The fixture binary deliberately defines no constructor
+//    at all. The evidence is the assertions below: V1's constructor always
+//    writes `is_paused: false` and overwrites Admin/Config with its args,
+//    so if anything had re-run at upgrade time, `paused_after` would be
+//    false and/or the admin/config keys would differ. They don't.
+//
+// Post-upgrade reads go through `env.as_contract` rather than a client
+// because the fixture binary intentionally exports only `version` and
+// `get_vault`. `env.as_contract` reads exactly the same ledger entries the
+// new binary itself would read — this is the harness reading chain state,
+// not the test poking values in.
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_admin_state_survives_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.sequence_number = 1000);
+
+    let admin = Address::generate(&env);
+    let vault_client = setup(&env, &admin, 10);
+
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+    let asset_c = Address::generate(&env); // never whitelisted — must stay that way
+
+    // Set the state through the contract's own admin paths, not raw
+    // storage pokes: whatever survives the upgrade has to be state the
+    // contract itself wrote.
+    vault_client.add_asset(&asset_a);
+    vault_client.add_asset(&asset_b);
+    vault_client.pause();
+
+    // V1's own views agree before the swap.
+    assert_eq!(vault_client.get_admin_address(), admin);
+    assert!(vault_client.is_paused());
+    assert!(vault_client.is_whitelisted(&asset_a));
+    assert!(vault_client.is_whitelisted(&asset_b));
+    assert!(!vault_client.is_whitelisted(&asset_c));
+    assert_eq!(vault_client.version(), 1);
+
+    // Snapshot every instance-storage key the new binary will inherit.
+    let admin_before: Address = env
+        .as_contract(&vault_client.address, || {
+            env.storage().instance().get(&DataKey::Admin)
+        })
+        .expect("__constructor must have stored the admin in instance storage");
+    let paused_before: bool = env.as_contract(&vault_client.address, || {
+        let state: VaultState = env
+            .storage()
+            .instance()
+            .get(&DataKey::State)
+            .expect("__constructor must have stored the pause state");
+        match state {
+            VaultState::V1(s) => s.is_paused,
+        }
+    });
+    let config_before: VaultConfig = env
+        .as_contract(&vault_client.address, || {
+            env.storage().instance().get(&DataKey::Config)
+        })
+        .expect("__constructor must have stored the config");
+    let wl_a_before: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_a.clone()))
+        })
+        .unwrap_or(false);
+    let wl_b_before: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_b.clone()))
+        })
+        .unwrap_or(false);
+    let wl_c_before: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_c.clone()))
+        })
+        .unwrap_or(false);
+
+    // Swap the SAME contract address over to a genuinely different binary.
+    let new_wasm_hash = install_new_wasm(&env);
+    vault_client.upgrade(&new_wasm_hash);
+
+    // Prove the bytecode actually changed before asserting anything about
+    // state: `version()` returns 2 only if this call is genuinely served
+    // by the fixture wasm.
+    assert_eq!(vault_client.version(), 2);
+
+    // 1. Admin is identical before and after the upgrade.
+    let admin_after: Address = env
+        .as_contract(&vault_client.address, || {
+            env.storage().instance().get(&DataKey::Admin)
+        })
+        .expect("admin key must still exist in instance storage after the upgrade");
+    assert_eq!(
+        admin_after, admin_before,
+        "admin changed across the upgrade"
+    );
+    assert_eq!(
+        admin_after, admin,
+        "admin is no longer the address that was named at deploy time"
+    );
+
+    // 2. Pause survives: we paused BEFORE the upgrade; the contract is
+    //    still paused AFTER it. If the constructor had re-run, this would
+    //    be false — V1's constructor unconditionally writes is_paused:
+    //    false.
+    let paused_after: bool = env.as_contract(&vault_client.address, || {
+        let state: VaultState = env
+            .storage()
+            .instance()
+            .get(&DataKey::State)
+            .expect("pause state key must still exist after the upgrade");
+        match state {
+            VaultState::V1(s) => s.is_paused,
+        }
+    });
+    assert_eq!(
+        paused_after, paused_before,
+        "pause state did not survive the upgrade"
+    );
+    assert!(
+        paused_after,
+        "contract is no longer paused after the upgrade — instance storage was reset"
+    );
+
+    // 3. Config survives, byte-identical to what the constructor wrote.
+    let config_after: VaultConfig = env
+        .as_contract(&vault_client.address, || {
+            env.storage().instance().get(&DataKey::Config)
+        })
+        .expect("config key must still exist after the upgrade");
+    assert_eq!(
+        config_after, config_before,
+        "config changed across the upgrade"
+    );
+    assert_eq!(
+        config_after,
+        // The vault was constructed with 10, and the constructor pins both
+        // bounds to the value it is given (#1075 split the single
+        // `default_timelock_ledgers` field into min/max).
+        VaultConfig::V1(VaultConfigV1 {
+            min_lock_ledgers: 10,
+            max_lock_ledgers: 10,
+        })
+    );
+
+    // 4. Whitelist entries survive — both whitelisted assets stay
+    //    whitelisted, and the asset that was never whitelisted did not
+    //    silently become one.
+    let wl_a_after: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_a.clone()))
+        })
+        .unwrap_or(false);
+    let wl_b_after: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_b.clone()))
+        })
+        .unwrap_or(false);
+    let wl_c_after: bool = env
+        .as_contract(&vault_client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::AssetWhitelist(asset_c.clone()))
+        })
+        .unwrap_or(false);
+
+    assert_eq!(wl_a_after, wl_a_before, "asset A whitelist entry changed");
+    assert!(wl_a_after, "asset A is no longer whitelisted");
+    assert_eq!(wl_b_after, wl_b_before, "asset B whitelist entry changed");
+    assert!(wl_b_after, "asset B is no longer whitelisted");
+    assert_eq!(wl_c_after, wl_c_before, "asset C's whitelist entry changed");
+    assert!(!wl_c_after, "asset C became whitelisted across the upgrade");
 }
