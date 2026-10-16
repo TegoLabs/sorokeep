@@ -1,3 +1,4 @@
+
 # Contributing to Lumens Vault
 
 Thanks for wanting to work on this. Read this whole file before your first
@@ -111,3 +112,10 @@ This repo's [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) applies here too. For 
 follow [`SECURITY.md`](../SECURITY.md)'s disclosure process — do not open a public issue for
 a suspected vulnerability, especially anything touching the contract's
 fund-safety logic.
+### The secret-scanning check
+
+Every PR touching `lumens-vault/` runs an automated secret scan (`.github/workflows/lumens-vault-secrets.yml`) that looks for Stellar secret keys (`S` + 55 base32 characters).
+
+If your PR fails this check:
+1. **If it's a real key**: rotate it immediately — it may have been exposed.
+2. **If it's a test fixture**: add it to the `allowlist` in the workflow with a comment explaining why it's safe.
