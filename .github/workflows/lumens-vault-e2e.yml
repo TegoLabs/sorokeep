@@ -1,0 +1,148 @@
+name: Lumens Vault Scheduled E2E
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      network:
+        description: 'Target network for E2E verification'
+        required: false
+        default: 'testnet'
+        type: choice
+        options:
+          - testnet
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  LUMENS_VAULT_NETWORK: testnet
+  LUMENS_VAULT_RPC_URL: ${{ vars.LUMENS_VAULT_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+  LUMENS_VAULT_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015'
+  LUMENS_VAULT_CONTRACT_ID: ${{ vars.LUMENS_VAULT_CONTRACT_ID }}
+
+jobs:
+  e2e-testnet:
+    name: Lumens Vault End-to-End Suite (Testnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Mask test account secrets
+        env:
+          E2E_DEPLOYER_SECRET: ${{ secrets.LUMENS_VAULT_E2E_DEPLOYER_SECRET }}
+          E2E_USER_SECRET: ${{ secrets.LUMENS_VAULT_E2E_USER_SECRET }}
+          E2E_ADMIN_SECRET: ${{ secrets.LUMENS_VAULT_E2E_ADMIN_SECRET }}
+        run: |
+          for secret_val in "$E2E_DEPLOYER_SECRET" "$E2E_USER_SECRET" "$E2E_ADMIN_SECRET"; do
+            if [ -n "$secret_val" ]; then
+              echo "::add-mask::$secret_val"
+            fi
+          done
+          echo "Configured secret masks for E2E test accounts (values never echoed)."
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Setup Rust & Wasm Target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Verify Testnet RPC Health & Run E2E Suite
+        id: e2e
+        env:
+          E2E_DEPLOYER_SECRET: ${{ secrets.LUMENS_VAULT_E2E_DEPLOYER_SECRET }}
+          E2E_USER_SECRET: ${{ secrets.LUMENS_VAULT_E2E_USER_SECRET }}
+          E2E_ADMIN_SECRET: ${{ secrets.LUMENS_VAULT_E2E_ADMIN_SECRET }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/e2e-diagnostics
+          DIAG_FILE="artifacts/e2e-diagnostics/summary.log"
+
+          echo "=== Lumens Vault E2E Diagnostics ($(date -u +%Y-%m-%dT%H:%M:%SZ)) ===" | tee "$DIAG_FILE"
+          echo "Commit: ${{ github.sha }}" | tee -a "$DIAG_FILE"
+          echo "RPC URL: $LUMENS_VAULT_RPC_URL" | tee -a "$DIAG_FILE"
+
+          HEALTH_RESP=$(curl -sS --max-time 15 -X POST "$LUMENS_VAULT_RPC_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}')
+          echo "RPC Health: $HEALTH_RESP" | tee -a "$DIAG_FILE"
+
+          if [ -f "lumens-vault/e2e/package.json" ]; then
+            echo "Running lumens-vault/e2e suite..." | tee -a "$DIAG_FILE"
+            npm --prefix lumens-vault/e2e ci
+            npm --prefix lumens-vault/e2e test 2>&1 | tee -a "$DIAG_FILE"
+          else
+            echo "Running contract integration verification as E2E baseline..." | tee -a "$DIAG_FILE"
+            cargo test --manifest-path lumens-vault/contracts/lumens-vault/Cargo.toml 2>&1 | tee -a "$DIAG_FILE"
+          fi
+
+      - name: Upload E2E diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumens-vault-e2e-diagnostics-${{ github.run_id }}
+          path: artifacts/e2e-diagnostics/
+          retention-days: 14
+
+      - name: Report failure on single tracking issue (deduplicated)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TRACKING_TITLE="[Lumens Vault E2E] Scheduled Testnet Suite Tracking Issue"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DIAG_TAIL=""
+          if [ -f "artifacts/e2e-diagnostics/summary.log" ]; then
+            DIAG_TAIL="$(tail -n 40 artifacts/e2e-diagnostics/summary.log)"
+          fi
+
+          # Search for an existing tracking issue (open or closed) by exact title so we never open duplicates
+          EXISTING_JSON=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --state all \
+            --search "\"$TRACKING_TITLE\" in:title" \
+            --json number,state,title \
+            --limit 20)
+
+          ISSUE_NUMBER=$(echo "$EXISTING_JSON" | jq -r --arg t "$TRACKING_TITLE" '.[] | select(.title == $t) | .number' | head -n 1)
+          ISSUE_STATE=$(echo "$EXISTING_JSON" | jq -r --arg t "$TRACKING_TITLE" '.[] | select(.title == $t) | .state' | head -n 1)
+
+          BODY="### Scheduled E2E Failure ($TIMESTAMP)
+          - **Workflow Run:** $RUN_URL
+          - **Commit:** \`${{ github.sha }}\`
+          - **RPC Endpoint:** \`$LUMENS_VAULT_RPC_URL\`
+
+          #### Diagnostic Tail
+          \`\`\`text
+          $DIAG_TAIL
+          \`\`\`"
+
+          if [ -n "$ISSUE_NUMBER" ] && [ "$ISSUE_NUMBER" != "null" ]; then
+            if [ "$ISSUE_STATE" = "CLOSED" ]; then
+              gh issue reopen "$ISSUE_NUMBER" --repo "${{ github.repository }}"
+            fi
+            gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body "$BODY"
+            echo "Updated existing tracking issue #$ISSUE_NUMBER."
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "$TRACKING_TITLE" \
+              --label "lumens-vault,testing,devops" \
+              --body "$BODY"
+            echo "Created initial tracking issue."
+          fi
