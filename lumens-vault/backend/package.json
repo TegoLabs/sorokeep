@@ -1,0 +1,30 @@
+{
+  "name": "lumens-vault-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lumens Vault display-cache and webhook ingestion backend",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.2.0",
+    "better-sqlite3": "^11.10.0",
+    "express": "^5.1.0",
+    "sorokeep": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  }
+}
