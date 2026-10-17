@@ -1,0 +1,46 @@
+name: Lumens Vault Backend CI
+
+on:
+  push:
+    paths:
+      - 'lumens-vault/backend/**'
+      - '.github/workflows/lumens-vault-backend.yml'
+  pull_request:
+    paths:
+      - 'lumens-vault/backend/**'
+      - '.github/workflows/lumens-vault-backend.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-ci:
+    name: Backend (Node 22 — install, typecheck, lint, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lumens-vault/backend
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
