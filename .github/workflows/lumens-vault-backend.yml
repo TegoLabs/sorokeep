@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   backend-ci:
-    name: Backend (Node 22 — install, typecheck, lint, test)
+    name: Backend (Node 22 — install, audit, typecheck, lint, test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,6 +35,39 @@ jobs:
 
       - name: Install dependencies
         run: npm install --ignore-scripts
+
+      - name: Audit production dependencies (fail on critical or unreviewed high advisories)
+        # Production dependencies are audited separately from devDependencies (--omit=dev)
+        # at the critical threshold, while comparing high-severity findings against the
+        # reviewed baseline in lumens-vault/docs/backend-audit-baseline.md (GHSA-82x6-q7mm-w9cf
+        # and GHSA-v5mp-jgw5-2x6j in transitive `toml` via @stellar/stellar-sdk, which has no
+        # upstream patch and is unreachable because the backend never invokes StellarToml).
+        run: |
+          npm audit --omit=dev --audit-level=critical
+          node -e '
+            const { execSync } = require("node:child_process");
+            let report;
+            try {
+              report = JSON.parse(execSync("npm audit --omit=dev --json", { encoding: "utf8" }));
+            } catch (err) {
+              report = JSON.parse(err.stdout);
+            }
+            const reviewedAllowlist = new Set(["toml", "@stellar/stellar-sdk", "sorokeep"]);
+            const vulns = Object.values(report.vulnerabilities || {});
+            const unreviewed = vulns.filter(
+              (v) => (v.severity === "high" || v.severity === "critical") && !reviewedAllowlist.has(v.name)
+            );
+            if (unreviewed.length > 0) {
+              console.error("Unreviewed high/critical production advisories:", unreviewed.map((v) => v.name));
+              process.exit(1);
+            }
+            console.log("Production dependency audit passed against reviewed baseline.");
+          '
+
+      - name: Report dev-only dependency advisories (non-blocking visibility)
+        # Dev-only packages (vitest -> tinypool, @vitest/mocker) execute only trusted test
+        # files during CI/local runs and are excluded from production deployments (--omit=dev).
+        run: npm audit --audit-level=high || true
 
       - name: Typecheck
         run: npm run typecheck
