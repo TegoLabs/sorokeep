@@ -469,6 +469,8 @@ sorokeep completion --script powershell | Out-File -FilePath (Join-Path $PROFILE
 
 List all watched contracts at a glance — an index view when you're managing more than a few contracts.
 
+For managing many contracts together (manifests, groups, bulk alerts, fleet status), see the [Fleet Management Guide](docs/fleet-management.md).
+
 ```bash
 sorokeep contracts [options]
 ```
