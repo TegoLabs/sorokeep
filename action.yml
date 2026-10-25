@@ -1,5 +1,5 @@
 name: 'Sorokeep TTL Check'
-description: 'Check Soroban smart contract TTL before deployments. Fails the workflow if TTL is below threshold.'
+description: 'Check Soroban smart contract TTL before deployments. Fails the workflow if TTL is below threshold. Works with Stellar testnet and mainnet.'
 author: 'Sorokeep'
 
 branding:
