@@ -8,6 +8,10 @@ name: Pre-deploy TTL extension
 # Scope these secrets to a protected GitHub environment or to a deployment workflow
 # that is restricted to the main branch. Avoid broad repo-wide access when a
 # production environment can be limited to the deploy job instead.
+#
+# Once the Sorokeep action is published to the GitHub Actions Marketplace, the
+# steps below can be replaced with the Marketplace-listed action reference
+# (see the CI/CD integration guide) for a pinned, versioned invocation.
 
 on:
   workflow_dispatch:
