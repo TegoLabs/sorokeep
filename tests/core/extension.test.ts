@@ -45,7 +45,7 @@ vi.mock("../../src/alerts/dispatcher.js", () => ({
 }));
 
 // Import after mocking
-const { extendEntries, restoreEntries, simulateExtension, simulateRestore, runAutoExtensions, clearSimulationCache } = await import(
+const { extendEntries, restoreEntries, simulateExtension, simulateRestore, runAutoExtensions, clearSimulationCache, isRateLimited, HOURLY_RATE_LIMIT } = await import(
     "../../src/core/extension.js"
 );
 
@@ -1490,6 +1490,54 @@ describe("Core Extension Logic", () => {
             expect(persistentCall).toBeDefined();
             expect(instanceCall?.[1]).toBe(100000);
             expect(persistentCall?.[1]).toBe(50000);
+        });
+    });
+
+    // =========================================================================
+    // 6. isRateLimited boundary at HOURLY_RATE_LIMIT (issue #465)
+    // =========================================================================
+    describe("isRateLimited boundary at HOURLY_RATE_LIMIT (issue #465)", () => {
+        function seedRecentExtensions(contractId: string, count: number): void {
+            const entryRow = db
+                .prepare("SELECT id FROM contract_entries WHERE contract_id = ? LIMIT 1")
+                .get(contractId) as { id: number };
+            for (let i = 0; i < count; i++) {
+                recordExtension(db, {
+                    contract_id: contractId,
+                    contract_entry_id: entryRow.id,
+                    old_ttl_ledgers: 1000,
+                    new_ttl_ledgers: 100000,
+                    tx_hash: `rate-limit-boundary-tx-${i}`,
+                    executed_at_ledger: 2400000 + i,
+                });
+            }
+        }
+
+        it("returns false at HOURLY_RATE_LIMIT - 1 (4 extensions in last hour: 5th extension is allowed)", () => {
+            const contractId = seedContract(db);
+            seedRecentExtensions(contractId, HOURLY_RATE_LIMIT - 1);
+
+            // With 4 extensions recorded in the last hour (< HOURLY_RATE_LIMIT = 5),
+            // isRateLimited (`count >= limit`) returns false so the 5th extension proceeds.
+            expect(isRateLimited(db, contractId)).toBe(false);
+        });
+
+        it("returns true at exactly HOURLY_RATE_LIMIT (5 extensions in last hour: 6th extension is blocked)", () => {
+            const contractId = seedContract(db);
+            seedRecentExtensions(contractId, HOURLY_RATE_LIMIT);
+
+            // `isRateLimited` uses `count >= limit` (HOURLY_RATE_LIMIT = 5).
+            // Once 5 extensions have been recorded in the last hour, the boundary is reached
+            // and any subsequent (6th) extension attempt within the hour is blocked.
+            expect(HOURLY_RATE_LIMIT).toBe(5);
+            expect(isRateLimited(db, contractId)).toBe(true);
+        });
+
+        it("returns true at HOURLY_RATE_LIMIT + 1 (6 extensions in last hour: remains rate-limited)", () => {
+            const contractId = seedContract(db);
+            seedRecentExtensions(contractId, HOURLY_RATE_LIMIT + 1);
+
+            expect(isRateLimited(db, contractId)).toBe(true);
         });
     });
 });
