@@ -27,6 +27,7 @@ import { registerTagCommand } from "../commands/tag.js";
 import { registerFleetCommand } from "../commands/fleet.js";
 import { registerGroupCommand } from "../commands/group.js";
 import { registerCloneConfigCommand } from "../commands/clone-config.js";
+import { registerVaultCommand } from "../commands/vault.js";
 import { setYesOverride } from "../utils/prompt.js";
 
 /**
@@ -119,6 +120,7 @@ export function createProgram() {
   registerFleetCommand(program);
   registerGroupCommand(program);
   registerCloneConfigCommand(program);
+  registerVaultCommand(program);
 
   return program;
 }
