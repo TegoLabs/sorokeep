@@ -623,6 +623,324 @@ export function registerGuardCommand(program: Command): void {
             }
         });
 
+    guard
+        .command("simulate <contractId>")
+        .description("Simulate a proposed extension policy and compare against the active policy without modifying the database")
+        .option("--target-ttl <ledgers>", "Proposed target TTL in ledgers after extension", "100000")
+        .option("--threshold <ledgers>", "Proposed threshold in ledgers below which entries trigger extension", "20000")
+        .option("--keypair <secret>", "Stellar secret key for simulating extension transactions")
+        .option("--keypair-env <var>", "Environment variable containing the secret key for simulation")
+        .option("--keypair-vault <path>", "HashiCorp Vault secret path for simulation")
+        .option("--json", "Output machine-readable JSON")
+        .action(async (
+            contractId: string,
+            options: {
+                targetTtl?: string;
+                threshold?: string;
+                keypair?: string;
+                keypairEnv?: string;
+                keypairVault?: string;
+                json?: boolean;
+            } = {},
+        ) => {
+            try {
+                const contractIdValidation = validateContractId(contractId);
+                if (!contractIdValidation.valid) {
+                    if (options.json) {
+                        printOutput({ success: false, error: "invalid_contract_id", contractId, message: contractIdValidation.reason }, true);
+                        process.exitCode = 1;
+                        return;
+                    }
+                    console.error(chalk.red(`Invalid contract ID: ${contractIdValidation.reason}`));
+                    process.exit(1);
+                    return;
+                }
+
+                const db = getDatabase();
+                const contract = getContract(db, contractId);
+                if (!contract) {
+                    if (options.json) {
+                        printOutput({ success: false, error: "contract_not_found", contractId }, true);
+                        process.exitCode = 1;
+                        return;
+                    }
+                    console.error(chalk.red(`Contract ${formatContractID(contractId)} not found. Run 'sorokeep watch' first.`));
+                    process.exit(1);
+                    return;
+                }
+
+                const targetTtlRaw = options.targetTtl ?? "100000";
+                const thresholdRaw = options.threshold ?? "20000";
+                const targetTTL = Number(targetTtlRaw);
+                const threshold = Number(thresholdRaw);
+                const isValidLedgerCount = (raw: string, value: number): boolean =>
+                    /^\d+$/.test(raw) && Number.isSafeInteger(value) && value > 0;
+
+                if (!isValidLedgerCount(targetTtlRaw, targetTTL)) {
+                    if (options.json) {
+                        printOutput({ success: false, error: "invalid_target_ttl", contractId, targetTtl: options.targetTtl }, true);
+                        process.exitCode = 1;
+                        return;
+                    }
+                    console.error(chalk.red("--target-ttl must be a positive number"));
+                    process.exit(1);
+                    return;
+                }
+
+                if (!isValidLedgerCount(thresholdRaw, threshold)) {
+                    if (options.json) {
+                        printOutput({ success: false, error: "invalid_threshold", contractId, threshold: options.threshold }, true);
+                        process.exitCode = 1;
+                        return;
+                    }
+                    console.error(chalk.red("--threshold must be a positive number"));
+                    process.exit(1);
+                    return;
+                }
+
+                if (threshold >= targetTTL) {
+                    if (options.json) {
+                        printOutput({ success: false, error: "invalid_threshold_range", contractId, targetTtl: targetTTL, threshold }, true);
+                        process.exitCode = 1;
+                        return;
+                    }
+                    console.error(chalk.red("--threshold must be less than --target-ttl"));
+                    process.exit(1);
+                    return;
+                }
+
+                const currentPolicy = getExtensionPolicy(db, contractId);
+
+                let keypairSource: string | undefined;
+                if (options.keypairEnv) {
+                    keypairSource = `env:${options.keypairEnv}`;
+                } else if (options.keypairVault) {
+                    keypairSource = `vault:${options.keypairVault}`;
+                } else if (options.keypair) {
+                    keypairSource = options.keypair;
+                }
+
+                let publicKey = currentPolicy?.keypair_public ?? "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
+                if (keypairSource) {
+                    const secretKey = await resolveSecretKey(keypairSource) ?? undefined;
+                    if (!secretKey) {
+                        if (options.json) {
+                            printOutput({ success: false, error: "secret_resolution_failed", contractId }, true);
+                            process.exitCode = 1;
+                            return;
+                        }
+                        console.error(chalk.red(`Failed to resolve secret key from source: ${keypairSource}`));
+                        process.exit(1);
+                        return;
+                    }
+                    const { Keypair } = await import("@stellar/stellar-sdk");
+                    publicKey = Keypair.fromSecret(secretKey).publicKey();
+                }
+
+                const entries = getEntriesForContract(db, contractId);
+                const lastCheckedLedger = contract.last_checked_ledger ?? null;
+
+                interface SimulatedEntryComparison {
+                    entryKeyXdr: string;
+                    entryType: string;
+                    label: string;
+                    remainingLedgers: number | null;
+                    currentTriggers: boolean;
+                    proposedTriggers: boolean;
+                    transition: "newly_triggers" | "stops_triggering" | "still_triggers" | "unchanged";
+                }
+
+                const comparisons: SimulatedEntryComparison[] = entries.map((entry) => {
+                    const label = getEntryLabel(entry);
+                    const liveUntil = entry.live_until_ledger ?? null;
+                    const remaining =
+                        liveUntil != null && lastCheckedLedger != null
+                            ? liveUntil - lastCheckedLedger
+                            : null;
+
+                    const currentTriggers =
+                        currentPolicy != null &&
+                        remaining != null &&
+                        remaining >= 0 &&
+                        remaining < currentPolicy.extend_when_below_ledgers;
+
+                    const proposedTriggers =
+                        remaining != null &&
+                        remaining >= 0 &&
+                        remaining < threshold;
+
+                    let transition: SimulatedEntryComparison["transition"] = "unchanged";
+                    if (!currentTriggers && proposedTriggers) {
+                        transition = "newly_triggers";
+                    } else if (currentTriggers && !proposedTriggers) {
+                        transition = "stops_triggering";
+                    } else if (currentTriggers && proposedTriggers) {
+                        transition = "still_triggers";
+                    }
+
+                    return {
+                        entryKeyXdr: entry.entry_key_xdr,
+                        entryType: entry.entry_type,
+                        label,
+                        remainingLedgers: remaining,
+                        currentTriggers,
+                        proposedTriggers,
+                        transition,
+                    };
+                });
+
+                const triggeringEntries = comparisons.filter((c) => c.proposedTriggers);
+                const newlyTriggering = comparisons.filter((c) => c.transition === "newly_triggers");
+                const stoppedTriggering = comparisons.filter((c) => c.transition === "stops_triggering");
+
+                let simulationResult: Awaited<ReturnType<typeof simulateExtension>> | null = null;
+                if (entries.length > 0) {
+                    const keysToSimulate =
+                        triggeringEntries.length > 0
+                            ? triggeringEntries.map((c) => c.entryKeyXdr)
+                            : entries.map((e) => e.entry_key_xdr);
+
+                    simulationResult = await simulateExtension(
+                        db,
+                        contractId,
+                        keysToSimulate,
+                        targetTTL,
+                        publicKey,
+                    );
+
+                    if (!simulationResult?.success) {
+                        if (options.json) {
+                            printOutput(
+                                {
+                                    success: false,
+                                    contractId,
+                                    mode: "simulate",
+                                    error: simulationResult?.error ?? "simulation_failed",
+                                },
+                                true,
+                            );
+                            process.exitCode = 1;
+                            return;
+                        }
+                        console.error(chalk.red(`Simulation failed: ${simulationResult?.error ?? "unknown error"}`));
+                        handleRpcUnreachableError(simulationResult?.error);
+                        process.exit(1);
+                        return;
+                    }
+                }
+
+                if (options.json) {
+                    printOutput(
+                        {
+                            success: true,
+                            contractId,
+                            mode: "simulate",
+                            currentPolicy: currentPolicy
+                                ? {
+                                      enabled: Boolean(currentPolicy.enabled),
+                                      target_ttl_ledgers: currentPolicy.target_ttl_ledgers,
+                                      extend_when_below_ledgers: currentPolicy.extend_when_below_ledgers,
+                                  }
+                                : null,
+                            proposedPolicy: {
+                                target_ttl_ledgers: targetTTL,
+                                extend_when_below_ledgers: threshold,
+                            },
+                            entries: comparisons,
+                            newlyTriggeringCount: newlyTriggering.length,
+                            stoppedTriggeringCount: stoppedTriggering.length,
+                            triggeringCount: triggeringEntries.length,
+                            estimatedFeeStroops: simulationResult?.estimatedFee ?? 0,
+                            estimatedFeeXlm:
+                                simulationResult?.estimatedFee != null
+                                    ? Number((simulationResult.estimatedFee / 10_000_000).toFixed(7))
+                                    : 0,
+                            simulation: simulationResult,
+                        },
+                        true,
+                    );
+                    return;
+                }
+
+                const displayName = contract.name ?? formatContractID(contractId);
+                console.log();
+                console.log(chalk.bold(`  Guard Policy Simulation (Dry-Run) — ${displayName}`));
+                console.log();
+                console.log(`  ${"Setting".padEnd(18)} ${"Current Active Policy".padEnd(28)} Proposed Policy`);
+                console.log(`  ${"─".repeat(18)} ${"─".repeat(28)} ${"─".repeat(28)}`);
+                const currentTargetStr = currentPolicy
+                    ? `${currentPolicy.target_ttl_ledgers.toLocaleString()} ledgers`
+                    : "none";
+                const currentThresholdStr = currentPolicy
+                    ? `${currentPolicy.extend_when_below_ledgers.toLocaleString()} ledgers`
+                    : "none";
+                console.log(
+                    `  ${"Target TTL".padEnd(18)} ${currentTargetStr.padEnd(28)} ${targetTTL.toLocaleString()} ledgers`,
+                );
+                console.log(
+                    `  ${"Threshold".padEnd(18)} ${currentThresholdStr.padEnd(28)} ${threshold.toLocaleString()} ledgers`,
+                );
+                console.log();
+
+                if (comparisons.length === 0) {
+                    console.log(chalk.yellow("  No entries tracked for this contract."));
+                } else {
+                    console.log(`  ${"Entry".padEnd(18)} ${"Remaining TTL".padEnd(18)} ${"Current".padEnd(16)} ${"Proposed".padEnd(16)} Change`);
+                    console.log(`  ${"─".repeat(18)} ${"─".repeat(18)} ${"─".repeat(16)} ${"─".repeat(16)} ${"─".repeat(20)}`);
+                    for (const row of comparisons) {
+                        const ttlText =
+                            row.remainingLedgers != null
+                                ? `${row.remainingLedgers.toLocaleString()} ledgers`
+                                : "unknown";
+                        const curText = row.currentTriggers ? "triggers" : "ok";
+                        const propText = row.proposedTriggers ? "triggers" : "ok";
+                        let changeText = "unchanged";
+                        if (row.transition === "newly_triggers") {
+                            changeText = chalk.yellow("newly triggers");
+                        } else if (row.transition === "stops_triggering") {
+                            changeText = chalk.cyan("stops triggering");
+                        } else if (row.transition === "still_triggers") {
+                            changeText = chalk.dim("still triggers");
+                        }
+                        console.log(
+                            `  ${row.label.padEnd(18)} ${ttlText.padEnd(18)} ${curText.padEnd(16)} ${propText.padEnd(16)} ${changeText}`,
+                        );
+                    }
+                }
+
+                console.log();
+                console.log(
+                    `  Summary: ${triggeringEntries.length} would trigger (${newlyTriggering.length} newly triggering, ${stoppedTriggering.length} stopped triggering)`,
+                );
+                if (simulationResult?.success) {
+                    const xlmFee = ((simulationResult.estimatedFee ?? 0) / 10_000_000).toFixed(7);
+                    console.log(
+                        `  Simulated Fee: ${xlmFee} XLM (${simulationResult.estimatedFee ?? 0} stroops)`,
+                    );
+                    if (simulationResult.cpuInsns !== undefined) {
+                        console.log(`  CPU:           ${formatCpuInsns(simulationResult.cpuInsns)}`);
+                    }
+                    if (simulationResult.memBytes !== undefined) {
+                        console.log(`  Memory:        ${formatBytes(simulationResult.memBytes)}`);
+                    }
+                }
+                console.log(chalk.dim("  Read-only simulation: active extension policy was not modified."));
+                console.log();
+            } catch (error: unknown) {
+                const msg = error instanceof Error ? error.message : String(error);
+                logger.error("Guard simulate command failed", { error: msg });
+                if (options.json) {
+                    printOutput({ success: false, error: msg, contractId }, true);
+                    process.exitCode = 1;
+                    return;
+                }
+                if (!handleRpcUnreachableError(error)) {
+                    console.error(chalk.red(`Error: ${msg}`));
+                }
+                process.exit(1);
+            }
+        });
+
     // Registered as a real (hidden, default) subcommand rather than attached
     // directly to `guard` via .argument()/.option() — Commander lets a
     // parent's own option silently shadow an identically-named option on a
