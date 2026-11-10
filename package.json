@@ -23,9 +23,9 @@
   },
   "scripts": {
     "prepare": "husky",
-    "build": "tsc && node -e \"const fs = require('fs'); fs.copyFileSync('src/db/schema.sql', 'dist/db/schema.sql'); const srcDir = 'src/db/migrations'; const destDir = 'dist/db/migrations'; if (fs.existsSync(srcDir)) { fs.mkdirSync(destDir, { recursive: true }); fs.readdirSync(srcDir).forEach(f => fs.copyFileSync(srcDir + '/' + f, destDir + '/' + f)); }\" && npm run build:man",
-    "build:man": "tsx scripts/generate-man.ts",
-    "dev": "tsx src/index.ts",
+    "build": "node init && tsc && node -e \"const fs = require('fs'); fs.copyFileSync('src/db/schema.sql', 'dist/db/schema.sql'); const srcDir = 'src/db/migrations'; const destDir = 'dist/db/migrations'; if (fs.existsSync(srcDir)) { fs.mkdirSync(destDir, { recursive: true }); fs.readdirSync(srcDir).forEach(f => fs.copyFileSync(srcDir + '/' + f, destDir + '/' + f)); }\" && npm run build:man",
+    "build:man": "node init && tsx scripts/generate-man.ts",
+    "dev": "node init && tsx src/index.ts",
     "mcp": "tsx src/mcp/index.ts",
     "lint": "eslint src/ tests/",
     "check:test-locations": "node scripts/check-test-file-locations.mjs",
